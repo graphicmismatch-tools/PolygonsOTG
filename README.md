@@ -50,9 +50,7 @@ Pen hover shows a highlight of the element you are about to pick, the sculpt bru
 
 **Pens reported as fingers.** Some tablets report their pen to Android as a plain finger: no stylus flag, constant pressure. The Lenovo Tab Pen Plus on the Idea Tab Pro is one. For those, turn on **Touch acts like a pen** (the pen chip in the top bar, or Settings). A single touch then behaves exactly like a pen: tap selects, dragging empty space box-selects, dragging an element moves it, and strokes sculpt anywhere. Two fingers still pinch, pan and undo, and the nav buttons orbit. This is the same model as Respite's "Fingers draw".
 
-**Full screen is off by default.** On some tablets, hiding the status and navigation bars puts the touch firmware into a full-screen profile that switches the active pen off until the screen is turned off and on again. This was seen on a Lenovo Idea Tab Pro with the Tab Pen Plus. The Android app therefore keeps the system bars visible, like most apps. *Settings → Display → Full screen* turns it back on.
-
-**Stylus troubleshooting.** *Menu → Stylus & touch test* shows, live, what the web layer and Android report for each pointer, and what the app makes of it. It covers pointer type, pressure, tilt, buttons, contact size, and the raw Android tool type and device. Some tablets report an active pen as a *finger*. The Android wrapper rewrites those events as stylus events when they come from a stylus input device. If a pen still arrives as a finger, *Settings → Pen detection → Thin contact = pen* treats tiny contacts as the pen. Pens that report no real pressure get full strength rather than a placeholder value, and pen taps tolerate tip jitter.
+**Stylus troubleshooting.** *Menu → Stylus & touch test* shows, live, what the web layer and Android report for each pointer, and what the app makes of it. It covers pointer type, pressure, tilt, buttons, contact size, and the raw Android tool type and device. Some tablets report an active pen as a *finger*. If a pen still arrives as a finger, *Settings → Pen detection → Thin contact = pen* treats tiny contacts as the pen. Pens that report no real pressure get full strength rather than a placeholder value, and pen taps tolerate tip jitter.
 
 **Transform tools** (Move / Rotate / Scale / Extrude) work on touch without a keyboard. Tap the
 tool, then drag anywhere. Drags add up, so you can lift your finger and keep adjusting. Use the X/Y/Z
@@ -78,14 +76,12 @@ src/
   app.ts       application controller (modes, tools, selection, actions, keyboard)
   ui/          DOM UI (top bar, tool rail, floating chips, modal bar, properties panel)
   io/          OBJ / GLB / STL import-export, file access (Android bridge or browser)
-android/       native wrapper: full-screen WebView + Storage Access Framework bridge
+android/       Capacitor 8 Android project (stock BridgeActivity, same setup as Respite)
 tests/         vitest unit tests for the geometry kernel
 ```
 
 The modelling kernel is plain TypeScript and does not depend on rendering. three.js is only used for
-display. The Android app is a thin native shell (`MainActivity.java`). It serves the built web
-app from APK assets through `WebViewAssetLoader`, so the WebView passes pen pressure, hover and
-tilt straight to the pointer-event layer. The same build also runs as an installable,
+display. The Android app is a stock [Capacitor](https://capacitorjs.com) shell, deliberately identical to the Respite editor's, which is known to keep active pens working on Lenovo tablets. Files are saved by writing to the cache and opening the share sheet (Filesystem + Share plugins), opened through the system file picker, and the back button goes through `@capacitor/app`. The same build also runs as an installable,
 offline-capable PWA.
 
 ## Building
@@ -98,15 +94,12 @@ npm run dev          # dev server (also reachable from a phone on the same netwo
 npm test             # geometry kernel tests
 npm run build        # production web build -> dist/
 
-# Android APK
-npm run android:sync             # build + copy dist/ into android/app/src/main/assets/web
-cd android
-echo "sdk.dir=$ANDROID_HOME" > local.properties
-./gradlew assembleRelease        # -> app/build/outputs/apk/release/app-release.apk
+# Android APK (Capacitor, same setup as Respite)
+npm run apk                      # build + cap sync + ./gradlew assembleDebug
+# -> android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The release build is signed with the debug key, so it installs directly with `adb install` or by sideloading.
-Set your own `signingConfig` in `android/app/build.gradle` before publishing to a store.
+The Android build needs JDK 21 and an Android SDK (`android/local.properties` → `sdk.dir=...`). The debug APK installs directly with `adb install` or by sideloading. Add a release `signingConfig` before publishing to a store.
 The GitHub Actions workflow (`.github/workflows/android.yml`) runs the tests and builds both the web
 bundle and the APK as downloadable artifacts.
 

@@ -44,7 +44,9 @@ input { font: inherit; color: inherit; }
 ::-webkit-scrollbar-thumb { background: var(--rule); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-#app { position: fixed; inset: 0; display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+#app { position: fixed; inset: 0; display: flex; flex-direction: column;
+  /* env() in browsers; Capacitor 8 also injects --safe-area-inset-* for edge-to-edge Android */
+  padding: max(env(safe-area-inset-top, 0px), var(--safe-area-inset-top, 0px)) max(env(safe-area-inset-right, 0px), var(--safe-area-inset-right, 0px)) max(env(safe-area-inset-bottom, 0px), var(--safe-area-inset-bottom, 0px)) max(env(safe-area-inset-left, 0px), var(--safe-area-inset-left, 0px)); }
 
 /* ---------------------------------------------------------------- top bar */
 .topbar { height: var(--top); flex: none; display: flex; align-items: stretch; gap: 0; padding: 0; background: var(--bg2); border-bottom: 1px solid var(--rule); }

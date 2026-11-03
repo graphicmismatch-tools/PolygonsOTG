@@ -48,7 +48,7 @@ export function openInputTest(app: App, onSettingsChanged: () => void) {
       `${kind.padEnd(12)} web pointerType = ${e.pointerType || '(empty)'}  →  app uses: ${cls.toUpperCase()}\n` +
       `pressure ${e.pressure.toFixed(3)}  tilt ${e.tiltX}/${e.tiltY}  buttons ${e.buttons}  button ${e.button}\n` +
       `contact ${e.width.toFixed(1)}×${e.height.toFixed(1)} px  id ${e.pointerId}  primary ${e.isPrimary}\n` +
-      (n ? `android: ${n.action} tool=${TOOL[n.tool] ?? n.tool} stylusSource=${n.stylusSource} buttons=${n.buttons} pressure=${Number(n.pressure).toFixed(3)}\n         device "${n.device}"  pen events corrected: ${n.fixed}` : 'android: (not running inside the Android app)');
+      (n ? `android: ${n.action} tool=${TOOL[n.tool] ?? n.tool} stylusSource=${n.stylusSource} buttons=${n.buttons} pressure=${Number(n.pressure).toFixed(3)}\n         device "${n.device}"  pen events corrected: ${n.fixed}` : 'android: (raw Android events are not exposed in this build)');
     renderSummary();
   };
 

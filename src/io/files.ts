@@ -1,8 +1,13 @@
 /* ======================================================================
- * Platform file access. In the Android wrapper a JS bridge
- * (window.PolygonsAndroid) uses the Storage Access Framework; in a
- * browser we fall back to downloads / <input type=file>.
+ * Platform file access. In the Android app (Capacitor, same setup as
+ * Respite) files are written to the cache and handed to the share sheet,
+ * because <a download> does nothing in a WebView. Opening uses
+ * <input type=file>, which Capacitor's WebView client turns into the
+ * system file picker. In a browser we use downloads.
  * ==================================================================== */
+import { Capacitor } from '@capacitor/core';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
 
 interface AndroidBridge {
   saveFile(name: string, mime: string, base64: string): void;
@@ -19,7 +24,7 @@ declare global {
   }
 }
 
-export const isAndroidApp = () => typeof window !== 'undefined' && !!window.PolygonsAndroid;
+export const isAndroidApp = () => Capacitor.isNativePlatform();
 
 function toBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
@@ -33,9 +38,11 @@ export async function saveFile(name: string, mime: string, data: string | ArrayB
   let blob: Blob;
   if (data instanceof Blob) blob = data;
   else blob = new Blob([data], { type: mime });
-  if (window.PolygonsAndroid) {
-    const buf = await blob.arrayBuffer();
-    window.PolygonsAndroid.saveFile(name, mime, toBase64(buf));
+  if (Capacitor.isNativePlatform()) {
+    const data = toBase64(await blob.arrayBuffer());
+    const { uri } = await Filesystem.writeFile({ path: name, data, directory: Directory.Cache });
+    try { await Share.share({ title: name, files: [uri] }); }
+    catch (e) { if (!/cancel/i.test(String((e as Error)?.message ?? e))) throw e; }
     return;
   }
   const url = URL.createObjectURL(blob);

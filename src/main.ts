@@ -1,6 +1,8 @@
 import './styles.css';
 import { UI } from './ui/ui';
 import { closeMenus, h, installTooltips } from './ui/dom';
+import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
 import { Gestures } from './input';
 import { openInputTest } from './ui/inputTest';
 
@@ -40,8 +42,8 @@ function startApp() {
     ui.renderAll();
   })();
 
-  // Android back button (called by the native wrapper). Returns true when handled.
-  (window as any).__onAndroidBack = (): boolean => {
+  // Android back button: close / cancel / leave sub-modes first, exit only from object mode.
+  const onBack = (): boolean => {
     const app = ui.app;
     const overlay = document.querySelector('.dialog-backdrop, .menu-backdrop');
     if (overlay) { closeMenus(); document.querySelectorAll('.dialog-backdrop').forEach((d) => d.remove()); return true; }
@@ -52,9 +54,11 @@ function startApp() {
     if (app.mode !== 'object') { app.setMode('object'); return true; }
     return false;
   };
+  (window as any).__onAndroidBack = onBack;
+  if (Capacitor.isNativePlatform()) CapApp.addListener('backButton', () => { if (!onBack()) CapApp.exitApp(); });
 }
 
 // Offline support when served over http(s) (not inside the Android asset loader).
-if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !location.hostname.includes('appassets') && import.meta.env.PROD) {
+if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !Capacitor.isNativePlatform() && import.meta.env.PROD) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
 }

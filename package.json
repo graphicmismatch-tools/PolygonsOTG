@@ -9,12 +9,19 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
     "test": "vitest run",
-    "android:sync": "npm run build && node scripts/sync-android.mjs"
+    "android:sync": "npm run build && cap sync android",
+    "apk": "npm run android:sync && cd android && ./gradlew assembleDebug"
   },
   "dependencies": {
+    "@capacitor/android": "8.5.3",
+    "@capacitor/app": "8.1.2",
+    "@capacitor/core": "8.5.3",
+    "@capacitor/filesystem": "8.1.5",
+    "@capacitor/share": "8.0.3",
     "three": "^0.170.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.5.3",
     "@types/three": "^0.170.0",
     "typescript": "5.6",
     "vite": "^6.4.5",
