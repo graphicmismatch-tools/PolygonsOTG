@@ -59,6 +59,12 @@ export interface GestureSettings {
    * tablets whose pen arrives as a finger even after the native fix.
    */
   stylusDetect: 'auto' | 'thin';
+  /**
+   * Respite-style input: a single touch is a tool (like a pen) instead of
+   * navigation. For styluses the OS reports as fingers (e.g. Lenovo Tab Pen
+   * Plus on the Idea Tab Pro). Two fingers still pinch / pan / undo.
+   */
+  touchAsPen: boolean;
 }
 
 /** Contact size (CSS px) at or below which a "touch" counts as a pen in 'thin' mode. */
@@ -73,6 +79,8 @@ interface Track {
   handler: ToolHandler | null;
   role: 'pending' | 'tool' | 'orbit' | 'pan' | 'zoom' | 'nav2' | 'ignore';
   moved: boolean;
+  /** How tools should treat this pointer ('pen' for touches in touch-as-pen mode). */
+  toolType: PType;
 }
 
 // Pens (especially EMR / MPP digitisers) jitter a few px on contact, so a pen
@@ -88,7 +96,7 @@ export class Gestures {
   private lastTap = { t: 0, x: 0, y: 0, count: 0 };
   private longPressTimer: number | null = null;
   private multi = { start: 0, maxCount: 0, moved: false, fired: false, lastDist: 0, lastCx: 0, lastCy: 0 };
-  settings: GestureSettings = { palmRejection: 'auto', longPressMs: 380, stylusDetect: 'auto' };
+  settings: GestureSettings = { palmRejection: 'auto', longPressMs: 380, stylusDetect: 'auto', touchAsPen: false };
   /** Becomes true once a pen reports a pressure that isn't a placeholder (0 / 0.5 / 1). */
   pressureSupported = false;
   /** Raw event log for the stylus test screen. */
@@ -166,7 +174,7 @@ export class Gestures {
     const p = this.info(e);
     this.onRaw?.(e, p.type);
     try { this.el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-    const tr: Track = { id: e.pointerId, type: p.type, x, y, sx: x, sy: y, t0: performance.now(), handler: null, role: 'pending', moved: false };
+    const tr: Track = { id: e.pointerId, type: p.type, x, y, sx: x, sy: y, t0: performance.now(), handler: null, role: 'pending', moved: false, toolType: p.type === 'touch' && this.settings.touchAsPen ? 'pen' : p.type };
     this.tracks.set(e.pointerId, tr);
 
     if (p.type === 'pen') {
@@ -203,6 +211,12 @@ export class Gestures {
       else { this.multi.maxCount = Math.max(this.multi.maxCount, touches.length); Object.assign(this.multi, this.multiMetrics()); }
       return;
     }
+    if (this.settings.touchAsPen) {
+      // single touch behaves exactly like a pen tip: tool, tap, or (on drag) box select
+      const h = this.cb.beginTool(x, y, { ...p, type: 'pen' });
+      if (h) { tr.handler = h; tr.role = 'tool'; }
+      return;
+    }
     if (this.touchIsNavOnly()) { tr.role = 'orbit'; return; }
     const h = this.cb.beginTool(x, y, p);
     if (h) { tr.handler = h; tr.role = 'tool'; return; }
@@ -229,7 +243,7 @@ export class Gestures {
     const { x, y } = this.pos(e);
     const p = this.info(e);
     const tr = this.tracks.get(e.pointerId);
-    if (tr) p.type = tr.type; // keep the classification made at pointer-down
+    if (tr) p.type = tr.toolType; // keep the classification made at pointer-down
     this.onRaw?.(e, p.type);
     if (!tr) {
       if (!this.isSurface(e)) return;
@@ -249,7 +263,7 @@ export class Gestures {
         const evs = (e.getCoalescedEvents?.() ?? []) as PointerEvent[];
         if (evs.length > 1) {
           const r = this.el.getBoundingClientRect();
-          for (const ce of evs) tr.handler!.move(ce.clientX - r.left, ce.clientY - r.top, this.info(ce));
+          for (const ce of evs) tr.handler!.move(ce.clientX - r.left, ce.clientY - r.top, { ...this.info(ce), type: tr.toolType });
         } else tr.handler!.move(x, y, p);
         break;
       }
@@ -268,20 +282,20 @@ export class Gestures {
       case 'pending': {
         if (!tr.moved) break;
         // a quick, small pen wiggle is still a tap: wait before turning it into a box select
-        if (tr.type === 'pen' && performance.now() - tr.t0 < QUICK_TAP.ms && Math.hypot(x - tr.sx, y - tr.sy) < QUICK_TAP.px) break;
+        if (tr.toolType === 'pen' && performance.now() - tr.t0 < QUICK_TAP.ms && Math.hypot(x - tr.sx, y - tr.sy) < QUICK_TAP.px) break;
         this.clearLongPress();
-        if (tr.type === 'touch') {
+        if (tr.toolType === 'touch') {
           tr.role = this.cb.touchDragOrbits() ? 'orbit' : 'ignore';
           if (tr.role === 'orbit') this.cb.orbit(x - tr.sx, y - tr.sy);
         } else {
           const h = this.cb.beginBox(tr.sx, tr.sy, p);
           if (h) { tr.handler = h; tr.role = 'tool'; h.move(x, y, p); }
-          else tr.role = tr.type === 'pen' ? 'ignore' : 'orbit';
+          else tr.role = tr.toolType === 'pen' ? 'ignore' : 'orbit';
         }
         break;
       }
     }
-    if (tr.type !== 'touch' && tr.role !== 'tool') this.cb.hover(x, y, p);
+    if (tr.toolType !== 'touch' && tr.role !== 'tool') this.cb.hover(x, y, p);
   };
 
   private up = (e: PointerEvent) => {
@@ -290,8 +304,8 @@ export class Gestures {
     e.preventDefault();
     const { x, y } = this.pos(e);
     const p = this.info(e);
-    p.type = tr.type;
-    this.onRaw?.(e, p.type);
+    p.type = tr.toolType;
+    this.onRaw?.(e, tr.type);
     this.tracks.delete(e.pointerId);
     this.clearLongPress();
     if (tr.type === 'pen') { this.penDown = false; this.penLast = performance.now(); }
@@ -316,7 +330,8 @@ export class Gestures {
         if (remaining.length === 1) remaining[0].role = 'ignore';
       }
     }
-    if (p.type !== 'touch') this.cb.hover(x, y, p);
+    if (tr.type !== 'touch') this.cb.hover(x, y, p);
+    else if (!this.tracks.size) this.cb.hover(-1, -1, null); // fingers don't hover: clear cursors on lift
   };
 
   private emitTap(x: number, y: number, p: PInfo) {

@@ -93,7 +93,7 @@ export class UI {
   /** Persist pen/touch settings (they're device specific, so they live outside the project). */
   saveInputSettings() {
     const g = this.app.gestures.settings;
-    try { localStorage.setItem('polygons-otg-input', JSON.stringify({ palmRejection: g.palmRejection, stylusDetect: g.stylusDetect })); } catch { /* ignore */ }
+    try { localStorage.setItem('polygons-otg-input', JSON.stringify({ palmRejection: g.palmRejection, stylusDetect: g.stylusDetect, touchAsPen: g.touchAsPen })); } catch { /* ignore */ }
   }
 
   private loadInputSettings() {
@@ -103,6 +103,7 @@ export class UI {
       const g = this.app.gestures.settings;
       if (['auto', 'on', 'off'].includes(j.palmRejection)) { g.palmRejection = j.palmRejection; this.app.settings.palmRejection = j.palmRejection; }
       if (['auto', 'thin'].includes(j.stylusDetect)) g.stylusDetect = j.stylusDetect;
+      if (typeof j.touchAsPen === 'boolean') g.touchAsPen = j.touchAsPen;
     } catch { /* ignore */ }
   }
 
@@ -462,6 +463,9 @@ export class UI {
       items.push(pBtn);
     }
     if (app.mode !== 'sculpt') items.push(chip('snap', app.settings.snap.enabled, () => { app.settings.snap.enabled = !app.settings.snap.enabled; this.renderEditBar(); }, 'Snap to increments'));
+    const tap = app.gestures.settings.touchAsPen;
+    items.push(chip('touchPen', tap, () => { app.gestures.settings.touchAsPen = !tap; this.saveInputSettings(); this.renderEditBar(); this.renderStatus(); },
+      tap ? 'Touch acts like a pen: ON — 1 finger edits, 2 fingers navigate' : 'Touch acts like a pen: OFF — 1 finger navigates'));
     if (app.mode === 'sculpt') {
       const b = app.brush;
       items.push(this.slider('radius', 'Brush radius', b.radius, 5, 300, 1, (v) => { b.radius = v; app.vp.requestRender(); }, 'px'));
@@ -561,6 +565,10 @@ export class UI {
     const app = this.app;
     const pen = app.gestures.penMode;
     if (app.modal || this.uv.modal) return '';
+    if (app.gestures.settings.touchAsPen && !pen) {
+      if (app.mode === 'sculpt') return 'Touch = pen: 1 finger sculpts anywhere · 2 fingers pan/zoom · orbit with the nav buttons';
+      return 'Touch = pen: tap select · drag empty = box select · drag element = move · 2 fingers pan/zoom · orbit with the nav buttons';
+    }
     if (app.mode === 'sculpt' && app.brush.dyntopo) return (pen ? 'Pen sculpts' : 'Drag on mesh to sculpt') + ' · dynamic topology adds detail under the brush (Detail slider)';
     if (app.mode === 'sculpt') return pen ? 'Pen sculpts (pressure) · fingers navigate' : 'Drag on mesh to sculpt · drag off mesh to orbit · 2 fingers pan/zoom';
     if (app.tool === 'loopcut') return 'Tap an edge to insert an edge loop';
@@ -826,6 +834,8 @@ export class UI {
       h('h4', {}, 'Stylus & touch'),
       h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, 'Palm rejection'), seg([['auto', 'Auto'], ['on', 'Pen only'], ['off', 'Off']], g.palmRejection, (v) => { g.palmRejection = v; s.palmRejection = v; if (v === 'off' || v === 'auto') app.gestures.resetPen(); this.renderStatus(); this.saveInputSettings(); })),
       h('p', { class: 'note' }, 'Auto: once an active pen is used, fingers only navigate (orbit / pan / zoom) and the pen does all editing. Pen barrel button drag orbits.'),
+      check('Touch acts like a pen (1 finger edits, 2 fingers navigate)', g.touchAsPen, (x) => { g.touchAsPen = x; this.saveInputSettings(); this.renderEditBar(); this.renderStatus(); }),
+      h('p', { class: 'note' }, 'Turn this on if your stylus is reported as a finger (e.g. Lenovo Tab Pen Plus on the Idea Tab Pro): the pen then taps, box-selects, moves and sculpts like a real pen.'),
       h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, 'Pen detection'), seg([['auto', 'Auto'], ['thin', 'Thin contact = pen']], g.stylusDetect, (v) => { g.stylusDetect = v; this.saveInputSettings(); })),
       h('p', { class: 'note' }, 'Use "Thin contact = pen" only if the stylus test shows your pen arriving as a finger.'),
       h('div', { class: 'row' }, h('button', { class: 'tiny', onclick: () => openInputTest(this.app, () => this.saveInputSettings()) }, 'Open stylus & touch test')),

@@ -15,7 +15,7 @@ export function openInputTest(app: App, onSettingsChanged: () => void) {
   const summary = h('div', { class: 'input-summary' });
   const actions = h('div', { class: 'row' });
   const stats = {
-    pen: 0, touch: 0, mouse: 0, other: 0, hover: 0,
+    pen: 0, touch: 0, mouse: 0, other: 0, hover: 0, moves: 0, cancels: 0,
     pressures: new Set<number>(),
     thinTouches: 0, wideTouches: 0,
     nativeStylus: false, nativeFixed: 0, device: '',
@@ -59,11 +59,17 @@ export function openInputTest(app: App, onSettingsChanged: () => void) {
     if (stats.pen) lines.push([g.pressureSupported, g.pressureSupported ? `Pressure works (${stats.pressures.size} distinct levels)` : 'No real pressure reported — the app uses full strength']);
     if (stats.hover) lines.push([true, 'Hover works (preview highlights / brush cursor)']);
     if (stats.nativeStylus && !stats.pen && stats.touch) lines.push([false, 'Android sees a stylus but the web view gets a finger']);
-    if (!stats.pen && stats.thinTouches > 3 && stats.wideTouches === 0) lines.push([false, `Your pen seems to arrive as a finger with a tiny contact (≤ ${THIN_CONTACT_PX}px)`]);
+    if (!stats.pen && stats.thinTouches > 3 && stats.wideTouches === 0) lines.push([null, `All contacts so far were tiny (≤ ${THIN_CONTACT_PX}px) — draw with a finger too to compare`]);
+    if (stats.touch || stats.pen) lines.push([stats.moves > 0, `${stats.moves} move events${stats.cancels ? `, ${stats.cancels} cancelled` : ''}`]);
+    if (stats.touch && !stats.pen) lines.push([null, g.settings.touchAsPen
+      ? 'Touch acts like a pen is ON: one finger / your pen edits like a pen, two fingers navigate.'
+      : 'If your pen draws blue, Android reports it as a finger. Turn on "Touch acts like a pen" so it edits like a pen (two fingers still navigate).']);
     if (stats.device) lines.push([null, `Input device: ${stats.device}`]);
     for (const [ok, t] of lines) summary.append(h('div', { class: ok === null ? 'note' : ok ? 'ok' : 'bad' }, `${ok === null ? '' : ok ? '[ok] ' : '[!!] '}${t}`));
+    actions.append(h('button', { class: 'tiny', onclick: () => { g.settings.touchAsPen = !g.settings.touchAsPen; onSettingsChanged(); renderSummary(); } },
+      g.settings.touchAsPen ? 'Touch acts like a pen: ON' : 'Touch acts like a pen: OFF'));
     const thin = g.settings.stylusDetect === 'thin';
-    if ((!stats.pen && stats.thinTouches > 0) || thin) {
+    if ((!stats.pen && stats.thinTouches > 0 && stats.wideTouches > 0) || thin) {
       actions.append(h('button', { class: 'tiny', onclick: () => { g.settings.stylusDetect = thin ? 'auto' : 'thin'; onSettingsChanged(); renderSummary(); } },
         thin ? 'Use normal pen detection' : 'Treat thin contacts as pen'));
     }
@@ -85,6 +91,7 @@ export function openInputTest(app: App, onSettingsChanged: () => void) {
     const r = pad.getBoundingClientRect();
     const l = last.get(e.pointerId);
     if (!l) { if (e.pointerType !== 'touch') { stats.hover++; show(e, 'hover'); } return; }
+    stats.moves++;
     const evs = (e.getCoalescedEvents?.() ?? [e]) as PointerEvent[];
     for (const ce of evs.length ? evs : [e]) {
       const cx = ce.clientX - r.left, cy = ce.clientY - r.top;
@@ -102,7 +109,7 @@ export function openInputTest(app: App, onSettingsChanged: () => void) {
     }
     show(e, 'move');
   });
-  const end = (e: PointerEvent) => { last.delete(e.pointerId); show(e, e.type === 'pointercancel' ? 'CANCEL' : 'up'); };
+  const end = (e: PointerEvent) => { if (e.type === 'pointercancel') stats.cancels++; last.delete(e.pointerId); show(e, e.type === 'pointercancel' ? 'CANCEL' : 'up'); };
   pad.addEventListener('pointerup', end);
   pad.addEventListener('pointercancel', end);
   pad.addEventListener('contextmenu', (e) => e.preventDefault());
