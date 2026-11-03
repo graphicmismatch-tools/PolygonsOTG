@@ -12,6 +12,7 @@ import { Axis } from '../modes/transform';
 import { V3 } from '../core/vec';
 import { Modifier } from '../core/modifiers';
 import { openInputTest } from './inputTest';
+import { colorPicker } from './colorPicker';
 
 const MODES: { id: AppMode; label: string; icon: string }[] = [
   { id: 'object', label: 'Object', icon: 'modeObject' },
@@ -685,9 +686,13 @@ export class UI {
       this.panel.append(sec('Modifiers', mods, resultRow, h('div', { class: 'row' }, addMod,
         h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: app.vp.settings.showModifiersInEdit, onchange: (e: Event) => { app.vp.settings.showModifiersInEdit = (e.target as HTMLInputElement).checked; app.changed(); } }), 'Show in edit'))));
       // material
-      const color = h('input', { type: 'color', value: a.material.color }) as HTMLInputElement;
-      color.addEventListener('input', () => { a.material.color = color.value; app.redraw(); });
-      color.addEventListener('change', () => { app.changed(); });
+      const color = colorPicker({
+        id: a.id,
+        value: a.material.color,
+        onBegin: () => app.record('Colour'),
+        onInput: (hex) => { a.material.color = hex; app.redraw(); },
+        onCommit: (hex) => { a.material.color = hex; app.changed(); },
+      });
       const rough = h('input', { type: 'range', min: '0', max: '1', step: '0.01', value: String(a.material.roughness) }) as HTMLInputElement;
       rough.addEventListener('input', () => { a.material.roughness = +rough.value; app.redraw(); });
       rough.addEventListener('change', () => app.changed());
@@ -695,7 +700,7 @@ export class UI {
       metal.addEventListener('input', () => { a.material.metalness = +metal.value; app.redraw(); });
       metal.addEventListener('change', () => app.changed());
       this.panel.append(sec('Material',
-        h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Colour'), color),
+        color,
         h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Rough'), rough),
         h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Metal'), metal),
         h('div', { class: 'row' },
