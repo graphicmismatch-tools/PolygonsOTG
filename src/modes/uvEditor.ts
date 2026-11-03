@@ -519,7 +519,7 @@ export class UVEditor {
       ctx.setLineDash([]);
     }
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.font = '12px system-ui, sans-serif';
+    ctx.font = "11px 'JetBrains Mono', 'Roboto Mono', 'Droid Sans Mono', ui-monospace, monospace";
     ctx.fillText(m.selF.size ? `${faces.length} selected faces` : 'All faces (select faces in 3D to filter)', 10, this.height - 10);
   }
 

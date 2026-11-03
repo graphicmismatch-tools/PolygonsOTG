@@ -124,10 +124,11 @@ export function icon(name: string, size = 22): SVGSVGElement {
   svg.setAttribute('height', String(size));
   svg.setAttribute('fill', 'none');
   svg.setAttribute('stroke', 'currentColor');
-  svg.setAttribute('stroke-width', '1.8');
-  svg.setAttribute('stroke-linecap', 'round');
-  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('stroke-width', '1.7');
+  svg.setAttribute('stroke-linecap', 'square');
+  svg.setAttribute('stroke-linejoin', 'miter');
   svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('shape-rendering', 'geometricPrecision');
   const def = ICONS[name] ?? { d: '' };
   const path = (d: string, attrs: Record<string, string>) => {
     if (!d) return;
@@ -215,8 +216,9 @@ export function installTooltips() {
   }, true);
   document.addEventListener('contextmenu', (e) => { if (findTip(e)) e.preventDefault(); }, true);
   // hover tooltips for mouse and hovering pens
+  const canHover = () => matchMedia('(any-hover: hover)').matches;
   document.addEventListener('pointerover', (e) => {
-    if (e.pointerType === 'touch' || pressStart) return;
+    if (e.pointerType === 'touch' || pressStart || (e.pointerType === 'mouse' && !canHover())) return;
     const t = findTip(e);
     if (!t) return;
     clearTimeout(tipTimer);
@@ -259,7 +261,7 @@ export function showMenu(anchor: HTMLElement, items: MenuItem[], title?: string)
         closeMenus();
         it.action?.();
       },
-    }, h('span', { class: 'menu-check' }, it.checked ? '✓' : ''), h('span', { class: 'menu-label' }, it.label), it.hint ? h('span', { class: 'menu-hint' }, it.hint) : null, it.submenu ? h('span', { class: 'menu-hint' }, '›') : null);
+    }, h('span', { class: 'menu-check' }, it.checked === undefined ? '' : it.checked ? '[x]' : '[ ]'), h('span', { class: 'menu-label' }, it.label), it.hint ? h('span', { class: 'menu-hint' }, it.hint) : null, it.submenu ? h('span', { class: 'menu-hint' }, '›') : null);
     box.append(b);
   }
   backdrop.append(box);
