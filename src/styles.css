@@ -253,3 +253,10 @@ input.hue-slider::-webkit-slider-thumb, input.tint-slider::-webkit-slider-thumb 
 .swatch.on { border-color: var(--bg); outline: 2px solid var(--fg); }
 .preview-row { display: flex; gap: 0; align-items: center; margin: 8px 0; border: 1px solid var(--rule); }
 .preview-row span { flex: 1; height: 22px; }
+
+/* ---------------------------------------------------------------- stylus test */
+.input-test .input-pad { display: block; width: 100%; height: 240px; background: var(--bg2); border: 1px solid var(--rule); touch-action: none; margin: 6px 0; }
+.input-live { margin: 0; padding: 6px 8px; background: var(--bg2); border: 1px solid var(--rule2); font: 11px/1.4 var(--mono); white-space: pre-wrap; min-height: 6.5em; color: var(--fg3); user-select: text; }
+.input-summary { margin: 6px 0; font-size: 12px; }
+.input-summary .ok { color: var(--y); }
+.input-summary .bad { color: var(--danger); }

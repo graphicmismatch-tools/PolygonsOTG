@@ -11,6 +11,7 @@ import { saveFile, openFile, readAsDataURL, isAndroidApp } from '../io/files';
 import { Axis } from '../modes/transform';
 import { V3 } from '../core/vec';
 import { Modifier } from '../core/modifiers';
+import { openInputTest } from './inputTest';
 
 const MODES: { id: AppMode; label: string; icon: string }[] = [
   { id: 'object', label: 'Object', icon: 'modeObject' },
@@ -72,6 +73,7 @@ export class UI {
     this.app.uvRedraw = () => this.uv.redraw();
     this.uv.onModal = () => this.renderModal();
     installTooltips();
+    this.loadInputSettings();
     this.setTheme(this.theme, false);
 
     const app = this.app;
@@ -86,6 +88,22 @@ export class UI {
     ro.observe(this.viewUV);
     window.addEventListener('resize', () => { app.resize(); this.uv.resize(); });
     this.renderAll();
+  }
+
+  /** Persist pen/touch settings (they're device specific, so they live outside the project). */
+  saveInputSettings() {
+    const g = this.app.gestures.settings;
+    try { localStorage.setItem('polygons-otg-input', JSON.stringify({ palmRejection: g.palmRejection, stylusDetect: g.stylusDetect })); } catch { /* ignore */ }
+  }
+
+  private loadInputSettings() {
+    try {
+      const j = JSON.parse(localStorage.getItem('polygons-otg-input') ?? 'null');
+      if (!j) return;
+      const g = this.app.gestures.settings;
+      if (['auto', 'on', 'off'].includes(j.palmRejection)) { g.palmRejection = j.palmRejection; this.app.settings.palmRejection = j.palmRejection; }
+      if (['auto', 'thin'].includes(j.stylusDetect)) g.stylusDetect = j.stylusDetect;
+    } catch { /* ignore */ }
   }
 
   /** Apply a hue/tint theme to CSS and to the canvases. */
@@ -150,6 +168,7 @@ export class UI {
       ] },
       { separator: true, label: '' },
       { label: 'Settings…', action: () => this.settingsDialog() },
+      { label: 'Stylus & touch test…', action: () => openInputTest(this.app, () => this.saveInputSettings()) },
       { label: 'Gestures & shortcuts', action: () => this.helpDialog() },
     ], 'Polygons OTG');
   }
@@ -805,8 +824,11 @@ export class UI {
       preview,
       h('div', { class: 'row' }, h('button', { class: 'tiny', onclick: () => { hue.value = String(DEFAULT_THEME.hue); tint.value = String(DEFAULT_THEME.tint); upd(); } }, 'Reset to default')),
       h('h4', {}, 'Stylus & touch'),
-      h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, 'Palm rejection'), seg([['auto', 'Auto'], ['on', 'Pen only'], ['off', 'Off']], g.palmRejection, (v) => { g.palmRejection = v; s.palmRejection = v; if (v === 'off' || v === 'auto') app.gestures.resetPen(); this.renderStatus(); })),
+      h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, 'Palm rejection'), seg([['auto', 'Auto'], ['on', 'Pen only'], ['off', 'Off']], g.palmRejection, (v) => { g.palmRejection = v; s.palmRejection = v; if (v === 'off' || v === 'auto') app.gestures.resetPen(); this.renderStatus(); this.saveInputSettings(); })),
       h('p', { class: 'note' }, 'Auto: once an active pen is used, fingers only navigate (orbit / pan / zoom) and the pen does all editing. Pen barrel button drag orbits.'),
+      h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, 'Pen detection'), seg([['auto', 'Auto'], ['thin', 'Thin contact = pen']], g.stylusDetect, (v) => { g.stylusDetect = v; this.saveInputSettings(); })),
+      h('p', { class: 'note' }, 'Use "Thin contact = pen" only if the stylus test shows your pen arriving as a finger.'),
+      h('div', { class: 'row' }, h('button', { class: 'tiny', onclick: () => openInputTest(this.app, () => this.saveInputSettings()) }, 'Open stylus & touch test')),
       check('One-finger drag on empty space orbits', s.touchOrbit, (x) => (s.touchOrbit = x)),
       check('Drag vertices / selected elements directly', s.tweak, (x) => (s.tweak = x)),
       check('Left-handed layout (tools on the right)', s.leftHanded, (x) => { s.leftHanded = x; this.renderAll(); }),

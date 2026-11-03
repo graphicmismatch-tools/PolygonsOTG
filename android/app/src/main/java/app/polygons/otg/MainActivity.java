@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
 import android.util.Base64;
+import android.view.InputDevice;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -37,6 +39,9 @@ public class MainActivity extends Activity {
     private WebView web;
     private ValueCallback<Uri[]> pendingChooser;
     private byte[] pendingSave;
+    /** Last raw input seen by Android, for the in-app stylus test. */
+    private volatile String lastMotion = "{}";
+    private volatile int fixedStylusEvents = 0;
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
@@ -110,6 +115,88 @@ public class MainActivity extends Activity {
         }
     }
 
+    /*
+     * Some tablets (including several Lenovo models) report an active pen with
+     * tool type FINGER even though the event comes from a stylus input device.
+     * The WebView would then see a finger. Rewrite those pointers as STYLUS so
+     * the web layer gets pointerType "pen" with pressure, tilt and buttons.
+     */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        record(ev);
+        MotionEvent fixed = fixStylus(ev);
+        if (fixed != null) {
+            boolean r = super.dispatchTouchEvent(fixed);
+            fixed.recycle();
+            return r;
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent ev) {
+        record(ev);
+        MotionEvent fixed = fixStylus(ev);
+        if (fixed != null) {
+            boolean r = super.dispatchGenericMotionEvent(fixed);
+            fixed.recycle();
+            return r;
+        }
+        return super.dispatchGenericMotionEvent(ev);
+    }
+
+    private static boolean isStylusDevice(MotionEvent ev) {
+        if (ev.isFromSource(InputDevice.SOURCE_STYLUS)) return true;
+        if (android.os.Build.VERSION.SDK_INT >= 23 && ev.isFromSource(InputDevice.SOURCE_BLUETOOTH_STYLUS)) return true;
+        InputDevice d = ev.getDevice();
+        if (d == null) return false;
+        String n = d.getName() == null ? "" : d.getName().toLowerCase();
+        return n.contains("pen") || n.contains("stylus") || n.contains("wacom");
+    }
+
+    private MotionEvent fixStylus(MotionEvent ev) {
+        if (!isStylusDevice(ev)) return null;
+        int n = ev.getPointerCount();
+        boolean need = false;
+        for (int i = 0; i < n; i++) {
+            int t = ev.getToolType(i);
+            if (t == MotionEvent.TOOL_TYPE_FINGER || t == MotionEvent.TOOL_TYPE_UNKNOWN) { need = true; break; }
+        }
+        if (!need) return null;
+        // only rewrite single-pointer events: multi-pointer ones mixing a pen and fingers are left alone
+        if (n != 1) return null;
+        MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[n];
+        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[n];
+        for (int i = 0; i < n; i++) {
+            props[i] = new MotionEvent.PointerProperties();
+            ev.getPointerProperties(i, props[i]);
+            props[i].toolType = MotionEvent.TOOL_TYPE_STYLUS;
+            coords[i] = new MotionEvent.PointerCoords();
+            ev.getPointerCoords(i, coords[i]);
+        }
+        fixedStylusEvents++;
+        return MotionEvent.obtain(ev.getDownTime(), ev.getEventTime(), ev.getAction(), n, props, coords,
+                ev.getMetaState(), ev.getButtonState(), ev.getXPrecision(), ev.getYPrecision(),
+                ev.getDeviceId(), ev.getEdgeFlags(), ev.getSource(), ev.getFlags());
+    }
+
+    private void record(MotionEvent ev) {
+        try {
+            InputDevice d = ev.getDevice();
+            StringBuilder b = new StringBuilder("{");
+            b.append("\"action\":\"").append(MotionEvent.actionToString(ev.getActionMasked())).append("\",");
+            b.append("\"tool\":").append(ev.getToolType(0)).append(",");
+            b.append("\"source\":").append(ev.getSource()).append(",");
+            b.append("\"stylusSource\":").append(ev.isFromSource(InputDevice.SOURCE_STYLUS)).append(",");
+            b.append("\"buttons\":").append(ev.getButtonState()).append(",");
+            b.append("\"pressure\":").append(ev.getPressure(0)).append(",");
+            b.append("\"pointers\":").append(ev.getPointerCount()).append(",");
+            b.append("\"fixed\":").append(fixedStylusEvents).append(",");
+            b.append("\"device\":").append(jsString(d == null ? "?" : d.getName())).append("}");
+            lastMotion = b.toString();
+        } catch (Exception ignored) { }
+    }
+
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
@@ -170,6 +257,10 @@ public class MainActivity extends Activity {
     private class Bridge {
         @JavascriptInterface
         public boolean isAndroid() { return true; }
+
+        /** JSON describing the last raw MotionEvent (stylus diagnostics). */
+        @JavascriptInterface
+        public String lastMotion() { return lastMotion; }
 
         @JavascriptInterface
         public void saveFile(final String name, final String mime, final String base64) {

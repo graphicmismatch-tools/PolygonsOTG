@@ -564,7 +564,7 @@ export class App {
   /** Generic: no-move = tap (select), move beyond slop = start a free move. */
   private dragToMove(x: number, y: number, p: PInfo, beforeMove: () => void): ToolHandler {
     let s: TransformSession | null = null;
-    const slop = p.type === 'touch' ? 10 : 5;
+    const slop = p.type === 'touch' ? 10 : p.type === 'pen' ? 8 : 5;
     return {
       move: (mx, my) => {
         if (!s) {

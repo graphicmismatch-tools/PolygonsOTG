@@ -52,9 +52,17 @@ export interface GestureCallbacks {
 export interface GestureSettings {
   /** 'auto': fingers become navigation-only after a pen is used. */
   palmRejection: 'auto' | 'on' | 'off';
-  /** Use pressure from pens (sculpt). */
   longPressMs: number;
+  /**
+   * 'auto': trust pointerType (plus fixes for mis-reported pens).
+   * 'thin': also treat touches with a tiny contact area as a pen — for
+   * tablets whose pen arrives as a finger even after the native fix.
+   */
+  stylusDetect: 'auto' | 'thin';
 }
+
+/** Contact size (CSS px) at or below which a "touch" counts as a pen in 'thin' mode. */
+export const THIN_CONTACT_PX = 3;
 
 interface Track {
   id: number;
@@ -67,7 +75,10 @@ interface Track {
   moved: boolean;
 }
 
-const TAP_SLOP = { mouse: 4, pen: 6, touch: 12 };
+// Pens (especially EMR / MPP digitisers) jitter a few px on contact, so a pen
+// tap gets a generous slop; quick small wiggles still count as taps.
+const TAP_SLOP = { mouse: 4, pen: 10, touch: 12 };
+const QUICK_TAP = { ms: 220, px: 18 };
 
 export class Gestures {
   private tracks = new Map<number, Track>();
@@ -77,7 +88,11 @@ export class Gestures {
   private lastTap = { t: 0, x: 0, y: 0, count: 0 };
   private longPressTimer: number | null = null;
   private multi = { start: 0, maxCount: 0, moved: false, fired: false, lastDist: 0, lastCx: 0, lastCy: 0 };
-  settings: GestureSettings = { palmRejection: 'auto', longPressMs: 380 };
+  settings: GestureSettings = { palmRejection: 'auto', longPressMs: 380, stylusDetect: 'auto' };
+  /** Becomes true once a pen reports a pressure that isn't a placeholder (0 / 0.5 / 1). */
+  pressureSupported = false;
+  /** Raw event log for the stylus test screen. */
+  onRaw: ((e: PointerEvent, classifiedAs: PType) => void) | null = null;
   /** True while a pen is known to be in use (for UI hints). */
   /** True while two or more fingers are down (pinch). */
   get multiTouch() { return [...this.tracks.values()].filter((t) => t.role === 'nav2').length >= 2; }
@@ -99,11 +114,32 @@ export class Gestures {
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
+  /** Decide what kind of pointer this really is. */
+  classify(e: PointerEvent): PType {
+    const t = e.pointerType;
+    if (t === 'pen') return 'pen';
+    if (t === 'touch') {
+      if (this.settings.stylusDetect === 'thin' && e.width <= THIN_CONTACT_PX && e.height <= THIN_CONTACT_PX) return 'pen';
+      return 'touch';
+    }
+    if (t === 'mouse' || !t) {
+      // some digitisers arrive as "mouse" but report real pressure while touching
+      const pr = e.pressure;
+      if (t === 'mouse' && e.buttons && pr > 0 && pr !== 0.5 && pr !== 1) return 'pen';
+      return 'mouse';
+    }
+    return 'pen'; // unknown future pointer types: treat as a precise pointer
+  }
+
   private info(e: PointerEvent): PInfo {
-    const type = (e.pointerType || 'mouse') as PType;
-    let pressure = e.pressure;
-    if (type !== 'pen') pressure = 1;
-    else if (!pressure && e.buttons) pressure = 0.5;
+    const type = this.classify(e);
+    let pressure = 1;
+    if (type === 'pen') {
+      const raw = e.pressure;
+      if (raw > 0 && raw !== 0.5 && raw !== 1) this.pressureSupported = true;
+      // without real pressure data use full strength instead of a placeholder
+      pressure = !this.pressureSupported ? 1 : raw > 0 ? raw : e.buttons ? 0.5 : 0;
+    }
     return { type, pressure, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey, button: e.button, t: e.timeStamp };
   }
 
@@ -128,6 +164,7 @@ export class Gestures {
     e.preventDefault();
     const { x, y } = this.pos(e);
     const p = this.info(e);
+    this.onRaw?.(e, p.type);
     try { this.el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     const tr: Track = { id: e.pointerId, type: p.type, x, y, sx: x, sy: y, t0: performance.now(), handler: null, role: 'pending', moved: false };
     this.tracks.set(e.pointerId, tr);
@@ -138,7 +175,9 @@ export class Gestures {
       // cancel any finger interaction (palm)
       for (const t of this.tracks.values()) if (t.type === 'touch') { t.handler?.cancel(); t.handler = null; t.role = 'ignore'; }
       this.clearLongPress();
-      if (e.buttons & 2 || e.buttons & 32) { tr.role = 'orbit'; return; }
+      // barrel button (2) or eraser end (32) held while touching: orbit. Some pens report
+      // the eraser with button === 5 on down; treat that the same way.
+      if ((e.buttons & 2) || (e.buttons & 32) || e.button === 5 || e.button === 2) { tr.role = 'orbit'; return; }
       const h = this.cb.beginTool(x, y, p);
       if (h) { tr.handler = h; tr.role = 'tool'; }
       return;
@@ -190,6 +229,8 @@ export class Gestures {
     const { x, y } = this.pos(e);
     const p = this.info(e);
     const tr = this.tracks.get(e.pointerId);
+    if (tr) p.type = tr.type; // keep the classification made at pointer-down
+    this.onRaw?.(e, p.type);
     if (!tr) {
       if (!this.isSurface(e)) return;
       // hover (pen in range or mouse without buttons)
@@ -226,6 +267,8 @@ export class Gestures {
       }
       case 'pending': {
         if (!tr.moved) break;
+        // a quick, small pen wiggle is still a tap: wait before turning it into a box select
+        if (tr.type === 'pen' && performance.now() - tr.t0 < QUICK_TAP.ms && Math.hypot(x - tr.sx, y - tr.sy) < QUICK_TAP.px) break;
         this.clearLongPress();
         if (tr.type === 'touch') {
           tr.role = this.cb.touchDragOrbits() ? 'orbit' : 'ignore';
@@ -247,14 +290,17 @@ export class Gestures {
     e.preventDefault();
     const { x, y } = this.pos(e);
     const p = this.info(e);
+    p.type = tr.type;
+    this.onRaw?.(e, p.type);
     this.tracks.delete(e.pointerId);
     this.clearLongPress();
     if (tr.type === 'pen') { this.penDown = false; this.penLast = performance.now(); }
 
     if (tr.role === 'tool') {
       tr.handler!.end(x, y, p);
-    } else if (tr.role === 'pending' && !tr.moved) {
-      this.emitTap(x, y, p);
+    } else if (tr.role === 'pending') {
+      // still pending means it never became a drag: a tap (pens may have wiggled a little)
+      this.emitTap(tr.moved ? tr.sx : x, tr.moved ? tr.sy : y, p);
     } else if (tr.role === 'nav2') {
       // multi-finger tap: fire on the first finger lift
       const dt = performance.now() - this.multi.start;

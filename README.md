@@ -48,6 +48,8 @@ navigate (orbit, pan, zoom) and all editing is done with the pen. Touches that l
 down or hovering are ignored. You can change this in *Menu → Settings*: *Pen only*, or *Off*.
 Pen hover shows a highlight of the element you are about to pick, the sculpt brush cursor, and a preview of where a loop cut will go.
 
+**Stylus troubleshooting.** *Menu → Stylus & touch test* shows, live, what the web layer and Android report for each pointer, and what the app makes of it. It covers pointer type, pressure, tilt, buttons, contact size, and the raw Android tool type and device. Some tablets report an active pen as a *finger*. The Android wrapper rewrites those events as stylus events when they come from a stylus input device. If a pen still arrives as a finger, *Settings → Pen detection → Thin contact = pen* treats tiny contacts as the pen. Pens that report no real pressure get full strength rather than a placeholder value, and pen taps tolerate tip jitter.
+
 **Transform tools** (Move / Rotate / Scale / Extrude) work on touch without a keyboard. Tap the
 tool, then drag anywhere. Drags add up, so you can lift your finger and keep adjusting. Use the X/Y/Z
 chips (or *N* for the face normal) to constrain to an axis, type an exact value, then tap ✓. Gizmo
