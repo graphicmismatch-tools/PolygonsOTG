@@ -7,6 +7,9 @@
 interface AndroidBridge {
   saveFile(name: string, mime: string, base64: string): void;
   isAndroid?(): boolean;
+  isFullscreen?(): boolean;
+  setFullscreen?(on: boolean): void;
+  lastMotion?(): string;
 }
 
 declare global {

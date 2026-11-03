@@ -50,6 +50,8 @@ Pen hover shows a highlight of the element you are about to pick, the sculpt bru
 
 **Pens reported as fingers.** Some tablets report their pen to Android as a plain finger: no stylus flag, constant pressure. The Lenovo Tab Pen Plus on the Idea Tab Pro is one. For those, turn on **Touch acts like a pen** (the pen chip in the top bar, or Settings). A single touch then behaves exactly like a pen: tap selects, dragging empty space box-selects, dragging an element moves it, and strokes sculpt anywhere. Two fingers still pinch, pan and undo, and the nav buttons orbit. This is the same model as Respite's "Fingers draw".
 
+**Full screen is off by default.** On some tablets, hiding the status and navigation bars puts the touch firmware into a full-screen profile that switches the active pen off until the screen is turned off and on again. This was seen on a Lenovo Idea Tab Pro with the Tab Pen Plus. The Android app therefore keeps the system bars visible, like most apps. *Settings → Display → Full screen* turns it back on.
+
 **Stylus troubleshooting.** *Menu → Stylus & touch test* shows, live, what the web layer and Android report for each pointer, and what the app makes of it. It covers pointer type, pressure, tilt, buttons, contact size, and the raw Android tool type and device. Some tablets report an active pen as a *finger*. The Android wrapper rewrites those events as stylus events when they come from a stylus input device. If a pen still arrives as a finger, *Settings → Pen detection → Thin contact = pen* treats tiny contacts as the pen. Pens that report no real pressure get full strength rather than a placeholder value, and pen taps tolerate tip jitter.
 
 **Transform tools** (Move / Rotate / Scale / Extrude) work on touch without a keyboard. Tap the

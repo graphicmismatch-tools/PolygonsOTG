@@ -49,7 +49,8 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         web = new WebView(this);
         setContentView(web);
-        goImmersive();
+        installInsetPadding();
+        applySystemBars();
 
         final WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
                 .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
@@ -100,19 +101,47 @@ public class MainActivity extends Activity {
         else web.loadUrl(START_URL);
     }
 
-    private void goImmersive() {
+    /*
+     * System bars stay visible by default (like most apps). Hiding them puts some
+     * tablets' touch firmware into a full-screen/game profile that switches the
+     * active-pen digitiser off until the screen is turned off and on again
+     * (seen on a Lenovo Idea Tab Pro with the Tab Pen Plus). Full screen is an
+     * opt-in setting.
+     */
+    private boolean fullscreen() {
+        return getSharedPreferences("polygons", MODE_PRIVATE).getBoolean("fullscreen", false);
+    }
+
+    private void applySystemBars() {
+        boolean fs = fullscreen();
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             WindowInsetsController c = getWindow().getInsetsController();
             if (c != null) {
-                c.hide(WindowInsets.Type.systemBars());
-                c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                if (fs) {
+                    c.hide(WindowInsets.Type.systemBars());
+                    c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                } else {
+                    c.show(WindowInsets.Type.systemBars());
+                }
             }
         } else {
-            getWindow().getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+            getWindow().getDecorView().setSystemUiVisibility(fs
+                    ? View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN
+                      | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                      | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    : 0);
         }
+        web.requestApplyInsets();
+    }
+
+    /** Keep the web content clear of visible system bars (Android 15 draws edge-to-edge). */
+    private void installInsetPadding() {
+        if (android.os.Build.VERSION.SDK_INT < 30) return;
+        web.setOnApplyWindowInsetsListener((v, insets) -> {
+            android.graphics.Insets i = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            v.setPadding(i.left, i.top, i.right, i.bottom);
+            return insets;
+        });
     }
 
     /*
@@ -200,7 +229,8 @@ public class MainActivity extends Activity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) goImmersive();
+        // only re-hide bars when the user opted into full screen
+        if (hasFocus && fullscreen()) applySystemBars();
     }
 
     @Override
@@ -257,6 +287,15 @@ public class MainActivity extends Activity {
     private class Bridge {
         @JavascriptInterface
         public boolean isAndroid() { return true; }
+
+        @JavascriptInterface
+        public boolean isFullscreen() { return fullscreen(); }
+
+        @JavascriptInterface
+        public void setFullscreen(final boolean on) {
+            getSharedPreferences("polygons", MODE_PRIVATE).edit().putBoolean("fullscreen", on).apply();
+            runOnUiThread(MainActivity.this::applySystemBars);
+        }
 
         /** JSON describing the last raw MotionEvent (stylus diagnostics). */
         @JavascriptInterface
