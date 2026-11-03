@@ -201,6 +201,9 @@ export class Viewport {
 
   requestRender() { this.needsRender = true; this.depthValid = false; }
 
+  /** Theme-driven background colour (any CSS colour string). */
+  setBackground(css: string) { this.renderer.setClearColor(new THREE.Color().setStyle(css)); this.requestRender(); }
+
   resize(w: number, h: number, dpr: number) {
     this.width = Math.max(1, w); this.height = Math.max(1, h); this.dpr = dpr;
     this.renderer.setPixelRatio(dpr);

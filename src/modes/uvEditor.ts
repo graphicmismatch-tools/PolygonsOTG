@@ -29,6 +29,8 @@ export class UVEditor {
   gestures: Gestures;
   onModal: () => void = () => {};
   fitted = false;
+  /** Theme colours for the 2D canvas. */
+  colors = { uvBg: '#1f2024', uvPaper: '#2c2d33', faceTint: 'rgba(160,160,170,0.10)', corner: '#e8e8ec' };
   private userMoved = false;
 
   constructor(private canvas: HTMLCanvasElement, private container: HTMLElement, private app: App) {
@@ -434,7 +436,7 @@ export class UVEditor {
   draw() {
     const ctx = this.ctx;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.fillStyle = '#1f2024';
+    ctx.fillStyle = this.colors.uvBg;
     ctx.fillRect(0, 0, this.width, this.height);
     const o = this.obj;
     if (!o) return;
@@ -443,7 +445,7 @@ export class UVEditor {
     const { scale } = this.view;
     const tl = this.toScreen([0, 1]);
     // texture / backdrop
-    ctx.fillStyle = '#2c2d33';
+    ctx.fillStyle = this.colors.uvPaper;
     ctx.fillRect(tl.x, tl.y, scale, scale);
     if (this.img && ((this.img as HTMLImageElement).complete !== false)) {
       ctx.globalAlpha = 0.85;
@@ -473,7 +475,7 @@ export class UVEditor {
       f.uv.forEach((u, i) => { const s = this.toScreen(u); if (i) ctx.lineTo(s.x, s.y); else ctx.moveTo(s.x, s.y); });
       ctx.closePath();
       const allSel = f.uv.every((_, c) => this.sel.has(ck(fi, c)));
-      ctx.fillStyle = allSel ? 'rgba(255,154,31,0.28)' : 'rgba(120,140,190,0.10)';
+      ctx.fillStyle = allSel ? 'rgba(255,154,31,0.28)' : this.colors.faceTint;
       ctx.fill();
       ctx.strokeStyle = 'rgba(20,20,24,0.9)';
       ctx.stroke();
@@ -500,7 +502,7 @@ export class UVEditor {
       f.uv.forEach((u, c) => {
         const s = this.toScreen(u);
         const sel = this.sel.has(ck(fi, c));
-        ctx.fillStyle = sel ? '#ffa033' : '#e8e8ec';
+        ctx.fillStyle = sel ? '#ffa033' : this.colors.corner;
         ctx.fillRect(s.x - r, s.y - r, r * 2, r * 2);
       });
     }

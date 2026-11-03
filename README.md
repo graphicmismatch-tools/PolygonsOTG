@@ -18,13 +18,17 @@ You can **import** OBJ, glTF/GLB and STL files. You can **export** OBJ (with UVs
 
 | | Touch | Active stylus | Mouse / keyboard |
 |---|---|---|---|
-| Select | Tap. The *Set / + / −* chips choose replace, toggle or remove | Tap (precise pick radius) | Click. Shift adds, Ctrl removes |
+| Select | Tap. The replace / add / remove chips choose how a tap changes the selection | Tap (precise pick radius) | Click. Shift adds, Ctrl removes |
 | Box select | Hold, then drag | Drag on empty space | Drag on empty space |
 | Move an element | Drag a vertex (or a selected edge or face) | Drag it | Drag it |
 | Orbit | One-finger drag on empty space, or the orbit button | Drag with the barrel button held, or the nav buttons | Middle drag |
 | Pan / zoom | Two-finger drag / pinch | Nav buttons | Shift + middle drag or right drag / wheel |
 | Undo / redo | Two-finger tap / three-finger tap | Toolbar | Ctrl+Z / Ctrl+Shift+Z |
 | Sculpt | Drag on the mesh. A drag that starts off the mesh orbits | Pressure-sensitive strokes, with a hover cursor | Drag. Hold Ctrl to invert |
+
+**Icons & tooltips.** Tools are shown as icons. Long-press any icon to see its name; this never triggers the tool. Hovering with a pen or mouse also shows the name.
+
+**Appearance.** The interface is monochrome. In *Menu → Settings → Appearance* you pick the hue, and a tint strength (0 gives neutral grey). Functional colours stay fixed: X/Y/Z axis colours, red for destructive actions and seams, and the orange viewport selection.
 
 **Palm rejection.** In *Auto* mode (the default), once the app sees a pen, fingers only
 navigate (orbit, pan, zoom) and all editing is done with the pen. Touches that land while the pen is

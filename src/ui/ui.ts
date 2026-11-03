@@ -1,6 +1,7 @@
 import { App, SelOp } from '../app';
 import { AppMode } from '../render/viewport';
-import { h, clear, icon, showMenu, MenuItem, dialog, toast } from './dom';
+import { h, clear, icon, showMenu, MenuItem, dialog, toast, installTooltips } from './dom';
+import { Theme, loadTheme, saveTheme, applyTheme, canvasColors, HUE_PRESETS, DEFAULT_THEME } from './theme';
 import { PRIMITIVES } from '../core/primitives';
 import { BRUSHES } from '../modes/sculpt';
 import { UVEditor } from '../modes/uvEditor';
@@ -10,12 +11,17 @@ import { saveFile, openFile, readAsDataURL, isAndroidApp } from '../io/files';
 import { Axis } from '../modes/transform';
 import { V3 } from '../core/vec';
 
-const MODES: { id: AppMode; label: string; short: string }[] = [
-  { id: 'object', label: 'Object', short: 'Obj' },
-  { id: 'edit', label: 'Edit', short: 'Edit' },
-  { id: 'sculpt', label: 'Sculpt', short: 'Sculpt' },
-  { id: 'uv', label: 'UV', short: 'UV' },
+const MODES: { id: AppMode; label: string; icon: string }[] = [
+  { id: 'object', label: 'Object', icon: 'modeObject' },
+  { id: 'edit', label: 'Edit', icon: 'modeEdit' },
+  { id: 'sculpt', label: 'Sculpt', icon: 'modeSculpt' },
+  { id: 'uv', label: 'UV editing', icon: 'modeUV' },
 ];
+
+const BRUSH_ICONS: Record<string, string> = {
+  draw: 'brushDraw', clay: 'brushClay', inflate: 'brushInflate', smooth: 'brushSmooth',
+  flatten: 'brushFlatten', pinch: 'brushPinch', crease: 'brushCrease', grab: 'brushGrab',
+};
 
 const deg = (r: number) => (r * 180) / Math.PI;
 const rad = (d: number) => (d * Math.PI) / 180;
@@ -34,6 +40,7 @@ export class UI {
   uv!: UVEditor;
   app!: App;
   private panelScroll = 0;
+  theme: Theme = loadTheme();
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -61,6 +68,8 @@ export class UI {
     this.uv = new UVEditor(uvCanvas, this.viewUV, this.app);
     this.app.uvRedraw = () => this.uv.redraw();
     this.uv.onModal = () => this.renderModal();
+    installTooltips();
+    this.setTheme(this.theme, false);
 
     const app = this.app;
     app.on('mode', () => { this.renderAll(); });
@@ -74,6 +83,17 @@ export class UI {
     ro.observe(this.viewUV);
     window.addEventListener('resize', () => { app.resize(); this.uv.resize(); });
     this.renderAll();
+  }
+
+  /** Apply a hue/tint theme to CSS and to the canvases. */
+  setTheme(t: Theme, save = true) {
+    this.theme = { hue: Math.round(t.hue) % 360, tint: Math.max(0, Math.min(1, t.tint)) };
+    applyTheme(this.theme);
+    const c = canvasColors(this.theme);
+    this.app.vp.setBackground(c.viewport);
+    Object.assign(this.uv.colors, { uvBg: c.uvBg, uvPaper: c.uvPaper, faceTint: c.faceTint, corner: c.corner });
+    this.uv.redraw();
+    if (save) saveTheme(this.theme);
   }
 
   renderAll() {
@@ -94,14 +114,15 @@ export class UI {
   renderTop() {
     const app = this.app;
     clear(this.topbar);
-    const menuBtn = h('button', { class: 'iconbtn', title: 'Menu', onclick: () => this.mainMenu(menuBtn) }, icon('menu'));
+    const menuBtn = h('button', { class: 'iconbtn', tip: 'Menu', onclick: () => this.mainMenu(menuBtn) }, icon('menu'));
     const tabs = h('div', { class: 'tabs' }, MODES.map((m) => h('button', {
       class: `tab${app.mode === m.id ? ' active' : ''}`,
+      tip: `${m.label} mode`,
       onclick: () => app.setMode(m.id),
-    }, h('span', { class: 'long' }, m.label), h('span', { class: 'short' }, m.short))));
-    const undo = h('button', { class: 'iconbtn', title: `Undo ${app.history.undoLabel}`, disabled: !app.history.canUndo && !app.modal, onclick: () => app.undo() }, icon('undo'));
-    const redo = h('button', { class: 'iconbtn', title: 'Redo', disabled: !app.history.canRedo, onclick: () => app.redo() }, icon('redo'));
-    const panel = h('button', { class: `iconbtn${app.settings.panelOpen ? ' on' : ''}`, title: 'Properties', onclick: () => { app.settings.panelOpen = !app.settings.panelOpen; this.renderAll(); } }, icon('panel'));
+    }, icon(m.icon, 22))));
+    const undo = h('button', { class: 'iconbtn', tip: app.history.undoLabel ? `Undo ${app.history.undoLabel}` : 'Undo', disabled: !app.history.canUndo && !app.modal, onclick: () => app.undo() }, icon('undo'));
+    const redo = h('button', { class: 'iconbtn', tip: 'Redo', disabled: !app.history.canRedo, onclick: () => app.redo() }, icon('redo'));
+    const panel = h('button', { class: `iconbtn${app.settings.panelOpen ? ' on' : ''}`, tip: 'Properties panel', onclick: () => { app.settings.panelOpen = !app.settings.panelOpen; this.renderAll(); } }, icon('panel'));
     const objName = app.active ? h('div', { class: 'objname' }, app.active.name) : null;
     this.topbar.append(menuBtn, tabs, h('div', { class: 'spacer' }), ...(objName ? [objName] : []), undo, redo, panel);
   }
@@ -201,14 +222,15 @@ export class UI {
   }
 
   /* ================================================================ left rail */
-  private btn(label: string, action: () => void, opts: { active?: boolean; title?: string; cls?: string; disabled?: boolean } = {}) {
-    return h('button', { class: `tool${opts.active ? ' active' : ''}${opts.cls ? ' ' + opts.cls : ''}`, title: opts.title ?? label, disabled: opts.disabled, onclick: action }, label);
+  /** Icon tool button; `name` is the friendly name shown on long-press. */
+  private btn(iconName: string, name: string, action: () => void, opts: { active?: boolean; cls?: string; disabled?: boolean } = {}) {
+    return h('button', { class: `tool${opts.active ? ' active' : ''}${opts.cls ? ' ' + opts.cls : ''}`, tip: name, disabled: opts.disabled, onclick: action }, icon(iconName, 24));
   }
-  private group(title: string, ...items: (HTMLElement | null)[]) {
-    return h('div', { class: 'rail-group' }, h('div', { class: 'rail-title' }, title), ...items);
+  private group(...items: (HTMLElement | null)[]) {
+    return h('div', { class: 'rail-group' }, ...items);
   }
-  private menuBtn(label: string, items: () => MenuItem[], title?: string) {
-    const b: HTMLButtonElement = h('button', { class: 'tool more', onclick: () => showMenu(b, items(), title ?? label) }, label);
+  private menuBtn(iconName: string, name: string, items: () => MenuItem[], cls = '') {
+    const b: HTMLButtonElement = h('button', { class: `tool more ${cls}`, tip: name, onclick: () => showMenu(b, items(), name) }, icon(iconName, 24));
     return b;
   }
 
@@ -217,21 +239,24 @@ export class UI {
     clear(this.rail);
     const T = (kind: 'move' | 'rotate' | 'scale') => () => app.startTransform(kind, 'button');
     const mode = app.mode;
+    const transforms = () => this.group(this.btn('move', 'Move', T('move')), this.btn('rotate', 'Rotate', T('rotate')), this.btn('scale', 'Scale', T('scale')));
     if (mode === 'object') {
       this.rail.append(
-        this.group('Create', this.menuBtn('Add', () => PRIMITIVES.map((p) => ({ label: p.label, action: () => app.addPrimitive(p.type) })), 'Add mesh')),
-        this.group('Transform', this.btn('Move', T('move')), this.btn('Rotate', T('rotate')), this.btn('Scale', T('scale'))),
-        this.group('Object',
-          this.btn('Duplicate', () => app.duplicateObjects()),
-          this.btn('Delete', () => app.deleteObjects(), { cls: 'danger' }),
-          this.btn('Join', () => app.joinObjects(), { title: 'Join selected into active' }),
-          this.menuBtn('Shading', () => [{ label: 'Flat', action: () => app.setShading(false) }, { label: 'Smooth', action: () => app.setShading(true) }]),
-          this.menuBtn('Apply', () => [
+        this.group(this.menuBtn('add', 'Add mesh', () => PRIMITIVES.map((p) => ({ label: p.label, action: () => app.addPrimitive(p.type) })))),
+        transforms(),
+        this.group(
+          this.btn('duplicate', 'Duplicate', () => app.duplicateObjects()),
+          this.btn('join', 'Join into active', () => app.joinObjects()),
+          this.btn('trash', 'Delete', () => app.deleteObjects(), { cls: 'danger' }),
+        ),
+        this.group(
+          this.menuBtn('shading', 'Shading', () => [{ label: 'Flat', action: () => app.setShading(false) }, { label: 'Smooth', action: () => app.setShading(true) }]),
+          this.menuBtn('apply', 'Apply transform', () => [
             { label: 'All transforms', action: () => app.applyTransform('all') },
             { label: 'Rotation & scale', action: () => app.applyTransform('rotscale') },
             { label: 'Location', action: () => app.applyTransform('location') },
           ]),
-          this.menuBtn('Origin', () => [
+          this.menuBtn('origin', 'Set origin', () => [
             { label: 'To geometry centre', action: () => app.setOrigin('geometry') },
             { label: 'To geometry bottom', action: () => app.setOrigin('bottom') },
             { label: 'To view centre', action: () => app.setOrigin('cursor') },
@@ -239,19 +264,21 @@ export class UI {
         ),
       );
     } else if (mode === 'edit' || mode === 'uv') {
-      if (mode === 'uv') this.rail.append(this.uvRail());
+      if (mode === 'uv') this.rail.append(...this.uvRail());
       this.rail.append(
-        this.group('Transform', this.btn('Move', T('move')), this.btn('Rotate', T('rotate')), this.btn('Scale', T('scale'))),
-        this.group('Model',
-          this.btn('Extrude', () => app.extrude()),
-          this.btn('Inset', () => app.inset()),
-          this.btn('Loop Cut', () => app.setTool(app.tool === 'loopcut' ? 'select' : 'loopcut'), { active: app.tool === 'loopcut', title: 'Tap an edge to cut a loop across it' }),
-          this.btn('Subdivide', () => app.subdivide()),
-          this.btn('Connect', () => app.connect(), { title: 'Connect selected vertices across faces (J)' }),
-          this.btn('Merge', () => app.merge(), { title: 'Merge selected vertices at centre (M)' }),
-          this.btn('Fill', () => app.fill(), { title: 'Make face / edge from selection (F)' }),
-          this.btn('Bridge', () => app.bridge(), { title: 'Bridge two edge loops' }),
-          this.menuBtn('Delete', () => [
+        transforms(),
+        this.group(
+          this.btn('extrude', 'Extrude (E)', () => app.extrude()),
+          this.btn('inset', 'Inset faces (I)', () => app.inset()),
+          this.btn('loopcut', 'Loop cut — tap an edge', () => app.setTool(app.tool === 'loopcut' ? 'select' : 'loopcut'), { active: app.tool === 'loopcut' }),
+          this.btn('subdivide', 'Subdivide', () => app.subdivide()),
+        ),
+        this.group(
+          this.btn('connect', 'Connect vertices (J)', () => app.connect()),
+          this.btn('merge', 'Merge at centre (M)', () => app.merge()),
+          this.btn('fill', 'Fill face / edge (F)', () => app.fill()),
+          this.btn('bridge', 'Bridge edge loops', () => app.bridge()),
+          this.menuBtn('deleteMenu', 'Delete', () => [
             { label: 'Vertices', action: () => app.deleteElements('vert') },
             { label: 'Edges', action: () => app.deleteElements('edge') },
             { label: 'Faces', action: () => app.deleteElements('face') },
@@ -259,8 +286,8 @@ export class UI {
             { label: 'Dissolve faces', action: () => app.deleteElements('dissolve') },
           ]),
         ),
-        this.group('More',
-          this.menuBtn('Select', () => [
+        this.group(
+          this.menuBtn('selectMenu', 'Select', () => [
             { label: 'All / none', hint: 'A', action: () => app.selectAll() },
             { label: 'Invert', action: () => app.selectInvert() },
             { label: 'Linked', hint: 'L', action: () => app.selectLinked() },
@@ -269,7 +296,7 @@ export class UI {
             { label: 'Edge loop', action: () => app.selectLoop() },
             { label: 'Edge ring', action: () => app.selectRing() },
           ]),
-          this.menuBtn('Mesh', () => [
+          this.menuBtn('meshMenu', 'Mesh tools', () => [
             { label: 'Duplicate', action: () => app.duplicateElements() },
             { label: 'Separate to object', action: () => app.separate() },
             { label: 'Split (disconnect)', action: () => app.splitSel() },
@@ -282,49 +309,49 @@ export class UI {
             { separator: true, label: '' },
             { label: 'Add primitive', submenu: () => PRIMITIVES.map((p) => ({ label: p.label, action: () => app.addPrimitive(p.type) })) },
           ]),
-          this.menuBtn('Seams', () => [
+          this.menuBtn('seams', 'Seams', () => [
             { label: 'Mark seam', action: () => app.markSeam(true) },
             { label: 'Clear seam', action: () => app.markSeam(false) },
             { label: 'Seams from UV islands', action: () => app.uvSeamsFromIslands() },
           ]),
-          mode === 'edit' ? this.btn('Unwrap', () => app.uvUnwrap(), { title: 'Unwrap UVs using seams (U)' }) : null,
+          mode === 'edit' ? this.btn('unwrap', 'Unwrap UVs (U)', () => app.uvUnwrap()) : null,
         ),
       );
     } else if (mode === 'sculpt') {
       const b = app.brush;
       this.rail.append(
-        this.group('Brush', ...BRUSHES.map((br) => this.btn(br.label, () => { b.type = br.type; this.renderRail(); this.renderPanel(); }, { active: b.type === br.type, title: br.hint }))),
-        this.group('Stroke',
-          this.btn(b.invert ? 'Subtract' : 'Add', () => { b.invert = !b.invert; this.renderRail(); app.vp.requestRender(); }, { active: b.invert, title: 'Invert brush direction (or hold Ctrl)' }),
-          this.btn('Sym X', () => { b.symmetryX = !b.symmetryX; this.renderRail(); }, { active: b.symmetryX }),
+        this.group(...BRUSHES.map((br) => this.btn(BRUSH_ICONS[br.type], `${br.label} brush`, () => { b.type = br.type; this.renderRail(); this.renderPanel(); }, { active: b.type === br.type }))),
+        this.group(
+          this.btn(b.invert ? 'brushSub' : 'brushAdd', b.invert ? 'Subtract (tap for add)' : 'Add (tap for subtract)', () => { b.invert = !b.invert; this.renderRail(); app.vp.requestRender(); }, { active: b.invert }),
+          this.btn('mirror', 'X symmetry', () => { b.symmetryX = !b.symmetryX; this.renderRail(); }, { active: b.symmetryX }),
         ),
-        this.group('Mesh',
-          this.btn('Subdivide', () => app.subdivideForSculpt(1), { title: 'Smooth-subdivide the whole mesh for more detail' }),
-          this.btn(app.active?.smooth ? 'Flat' : 'Smooth', () => { app.setShading(!app.active?.smooth); this.renderRail(); }),
+        this.group(
+          this.btn('subdivide', 'Subdivide whole mesh', () => app.subdivideForSculpt(1)),
+          this.btn('shading', app.active?.smooth ? 'Shade flat' : 'Shade smooth', () => { app.setShading(!app.active?.smooth); this.renderRail(); }, { active: !!app.active?.smooth }),
         ),
       );
     }
   }
 
-  private uvRail() {
+  private uvRail(): HTMLElement[] {
     const app = this.app, uv = this.uv;
-    return h('div', {},
-      this.group('Unwrap',
-        this.btn('Unwrap', () => app.uvUnwrap(), { title: 'Conformal unwrap using seams' }),
-        this.btn('Smart', () => app.uvSmart(), { title: 'Smart UV project (angle based)' }),
-        this.menuBtn('Project', () => [
+    return [
+      this.group(
+        this.btn('unwrap', 'Unwrap (seams)', () => app.uvUnwrap(), { cls: 'uvtool' }),
+        this.btn('smartUV', 'Smart UV project', () => app.uvSmart(), { cls: 'uvtool' }),
+        this.menuBtn('project', 'Project', () => [
           { label: 'From view', action: () => app.uvProject('view') },
           { label: 'Cube', action: () => app.uvProject('cube') },
           { label: 'Cylinder', action: () => app.uvProject('cylinder') },
           { label: 'Sphere', action: () => app.uvProject('sphere') },
-        ]),
-        this.btn('Pack', () => app.uvPack(), { title: 'Pack islands into 0–1' }),
+        ], 'uvtool'),
+        this.btn('pack', 'Pack islands', () => app.uvPack(), { cls: 'uvtool' }),
       ),
-      this.group('UV',
-        this.btn('Grab', () => uv.start('move')),
-        this.btn('Rotate', () => uv.start('rotate')),
-        this.btn('Scale', () => uv.start('scale')),
-        this.menuBtn('Tools', () => [
+      this.group(
+        this.btn('move', 'Grab UVs', () => uv.start('move'), { cls: 'uvtool' }),
+        this.btn('rotate', 'Rotate UVs', () => uv.start('rotate'), { cls: 'uvtool' }),
+        this.btn('scale', 'Scale UVs', () => uv.start('scale'), { cls: 'uvtool' }),
+        this.menuBtn('tools', 'UV tools', () => [
           { label: 'Select all / none', action: () => uv.selectAll() },
           { label: 'Select islands', action: () => uv.selectLinked() },
           { separator: true, label: '' },
@@ -337,64 +364,66 @@ export class UI {
           { label: 'Fit to 0–1', action: () => uv.op('fitBounds') },
           { separator: true, label: '' },
           { label: 'Frame UV view', action: () => uv.fit() },
-        ]),
-        this.menuBtn('Image', () => [
+        ], 'uvtool'),
+        this.menuBtn('image', 'Image & texture', () => [
           { label: 'Load texture…', action: () => this.loadTexture() },
           { label: 'Remove texture', action: () => this.setTexture(null), disabled: !app.active?.material.texture },
           { label: 'Checker preview', checked: app.vp.settings.checker, action: () => { app.vp.settings.checker = !app.vp.settings.checker; app.changed(); this.renderRail(); } },
           { label: 'Export UV layout PNG', action: () => uv.exportLayout() },
-        ]),
+        ], 'uvtool'),
       ),
-    );
+    ];
   }
 
   /* ================================================================ edit bar (floating chips) */
   renderEditBar() {
     const app = this.app;
     clear(this.editBar);
-    const chip = (content: Node | string, on: boolean, action: () => void, title: string) =>
-      h('button', { class: `chip${on ? ' on' : ''}`, title, onclick: action }, content);
+    const chip = (iconName: string, on: boolean, action: () => void, name: string) =>
+      h('button', { class: `chip${on ? ' on' : ''}`, tip: name, onclick: action }, icon(iconName, 20));
     const sep = () => h('span', { class: 'chip-sep' });
     const edit = app.isEditLike;
     const items: Node[] = [];
     if (edit) {
       items.push(
-        chip(icon('vert', 18), app.selectMode === 'vert', () => app.setSelectMode('vert'), 'Vertex select (1)'),
-        chip(icon('edge', 18), app.selectMode === 'edge', () => app.setSelectMode('edge'), 'Edge select (2)'),
-        chip(icon('face', 18), app.selectMode === 'face', () => app.setSelectMode('face'), 'Face select (3)'),
+        chip('vert', app.selectMode === 'vert', () => app.setSelectMode('vert'), 'Vertex select (1)'),
+        chip('edge', app.selectMode === 'edge', () => app.setSelectMode('edge'), 'Edge select (2)'),
+        chip('face', app.selectMode === 'face', () => app.setSelectMode('face'), 'Face select (3)'),
         sep(),
       );
     }
     if (app.mode !== 'sculpt') {
-      const ops: [SelOp, string, string][] = [['set', 'Set', 'Tap replaces selection'], ['add', '+', 'Tap toggles / adds to selection'], ['sub', '−', 'Tap removes from selection']];
-      for (const [id, l, t] of ops) items.push(chip(l, app.selOp === id, () => { app.selOp = id; this.renderEditBar(); }, t));
-      items.push(chip('All', false, () => app.selectAll(), 'Select all / none (A)'));
+      const ops: [SelOp, string, string][] = [['set', 'selSet', 'Tap replaces selection'], ['add', 'selAdd', 'Tap adds / toggles'], ['sub', 'selSub', 'Tap removes from selection']];
+      for (const [id, ic, t] of ops) items.push(chip(ic, app.selOp === id, () => { app.selOp = id; this.renderEditBar(); }, t));
+      items.push(chip('selAll', false, () => app.selectAll(), 'Select all / none (A)'));
       items.push(sep());
       const gz = app.settings.gizmo;
-      const gl: Record<string, string> = { move: '↔ Move', rotate: '⟳ Rot', scale: '⤢ Scale', none: 'Gizmo off' };
-      const gBtn: HTMLButtonElement = h('button', { class: `chip${gz !== 'none' ? ' on' : ''}`, title: 'Gizmo', onclick: () => showMenu(gBtn, (['move', 'rotate', 'scale', 'none'] as const).map((g) => ({ label: gl[g], checked: gz === g, action: () => { app.settings.gizmo = g; this.renderEditBar(); app.vp.requestRender(); } })), 'Gizmo') }, gl[gz]);
+      const gIcon: Record<string, string> = { move: 'move', rotate: 'rotate', scale: 'scale', none: 'gizmoOff' };
+      const gName: Record<string, string> = { move: 'Move gizmo', rotate: 'Rotate gizmo', scale: 'Scale gizmo', none: 'No gizmo' };
+      const gBtn: HTMLButtonElement = h('button', { class: `chip${gz !== 'none' ? ' on' : ''}`, tip: `Gizmo: ${gName[gz]}`, onclick: () => showMenu(gBtn, (['move', 'rotate', 'scale', 'none'] as const).map((g) => ({ label: gName[g], checked: gz === g, action: () => { app.settings.gizmo = g; this.renderEditBar(); app.vp.requestRender(); } })), 'Gizmo') }, icon(gIcon[gz], 20));
       items.push(gBtn);
     }
     if (edit) {
       items.push(
-        chip('X-ray', app.vp.settings.xray, () => { app.vp.settings.xray = !app.vp.settings.xray; app.changed(); }, 'See and select through the mesh'),
-        chip('Mirror X', app.settings.mirrorX, () => { app.settings.mirrorX = !app.settings.mirrorX; this.renderEditBar(); }, 'Symmetric vertex transforms across X'),
+        chip('xray', app.vp.settings.xray, () => { app.vp.settings.xray = !app.vp.settings.xray; app.changed(); this.renderEditBar(); }, 'X-ray: see & select through'),
+        chip('mirror', app.settings.mirrorX, () => { app.settings.mirrorX = !app.settings.mirrorX; this.renderEditBar(); }, 'Mirror edits across X'),
       );
     }
-    if (app.mode !== 'sculpt') items.push(chip('Snap', app.settings.snap.enabled, () => { app.settings.snap.enabled = !app.settings.snap.enabled; this.renderEditBar(); }, 'Snap to increments'));
+    if (app.mode !== 'sculpt') items.push(chip('snap', app.settings.snap.enabled, () => { app.settings.snap.enabled = !app.settings.snap.enabled; this.renderEditBar(); }, 'Snap to increments'));
     if (app.mode === 'sculpt') {
       const b = app.brush;
-      items.push(this.slider('Radius', b.radius, 5, 300, 1, (v) => { b.radius = v; app.vp.requestRender(); }, 'px'));
-      items.push(this.slider('Strength', b.strength, 0.01, 1, 0.01, (v) => { b.strength = v; app.vp.requestRender(); }));
+      items.push(this.slider('radius', 'Brush radius', b.radius, 5, 300, 1, (v) => { b.radius = v; app.vp.requestRender(); }, 'px'));
+      items.push(this.slider('strength', 'Brush strength', b.strength, 0.01, 1, 0.01, (v) => { b.strength = v; app.vp.requestRender(); }));
     }
     this.editBar.append(...items);
   }
 
-  private slider(label: string, value: number, min: number, max: number, step: number, set: (v: number) => void, unit = '') {
+  private slider(iconName: string, name: string, value: number, min: number, max: number, step: number, set: (v: number) => void, unit = '') {
     const out = h('span', { class: 'slider-val' }, `${fmt(value, 2)}${unit}`);
-    const input = h('input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(value) }) as HTMLInputElement;
+    const input = h('input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(value), 'aria-label': name }) as HTMLInputElement;
     input.addEventListener('input', () => { const v = +input.value; out.textContent = `${fmt(v, 2)}${unit}`; set(v); });
-    return h('label', { class: 'chip slider' }, h('span', {}, label), input, out);
+    const ic = h('span', { tip: name, style: 'display:grid' }, icon(iconName, 18));
+    return h('label', { class: 'chip slider' }, ic, input, out);
   }
 
   /* ================================================================ modal bar */
@@ -406,13 +435,13 @@ export class UI {
     const m = app.modal;
     if (!m && !uvModal) { bar.classList.add('hidden'); this.renderTop(); return; }
     bar.classList.remove('hidden');
-    const ok = h('button', { class: 'mbtn ok', title: 'Confirm (Enter)', onclick: () => { if (uvModal) this.uv.confirm(); else app.confirmModal(); } }, icon('check', 20));
-    const cancel = h('button', { class: 'mbtn cancel', title: 'Cancel (Esc)', onclick: () => { if (uvModal) this.uv.cancel(); else app.cancelModal(); } }, icon('close', 20));
+    const ok = h('button', { class: 'mbtn ok', tip: 'Confirm (Enter)', onclick: () => { if (uvModal) this.uv.confirm(); else app.confirmModal(); } }, icon('check', 20));
+    const cancel = h('button', { class: 'mbtn cancel', tip: 'Cancel (Esc)', onclick: () => { if (uvModal) this.uv.cancel(); else app.cancelModal(); } }, icon('close', 20));
     if (uvModal) {
       const axes: ('u' | 'v')[] = ['u', 'v'];
       bar.append(
         h('div', { class: 'mlabel' }, this.uv.describe()),
-        ...(uvModal.kind !== 'rotate' ? axes.map((a) => h('button', { class: `axis ${a === 'u' ? 'x' : 'y'}${uvModal.axis === a ? ' on' : ''}`, onclick: () => this.uv.setAxis(a) }, a.toUpperCase())) : []),
+        ...(uvModal.kind !== 'rotate' ? axes.map((a) => h('button', { class: `axis ${a === 'u' ? 'x' : 'y'}${uvModal.axis === a ? ' on' : ''}`, tip: `Lock to ${a.toUpperCase()}`, onclick: () => this.uv.setAxis(a) }, a.toUpperCase())) : []),
         this.numInput((v) => this.uv.setNumeric(v)),
         cancel, ok,
       );
@@ -420,7 +449,7 @@ export class UI {
     }
     if (m!.kind === 'transform') {
       const s = m!.session;
-      const axisBtn = (a: Axis, label: string) => h('button', { class: `axis ${a}${s.axis === a ? ' on' : ''}`, onclick: () => app.setModalAxis(a) }, label);
+      const axisBtn = (a: Axis, label: string) => h('button', { class: `axis ${a}${s.axis === a ? ' on' : ''}`, tip: a === 'n' ? 'Along normal' : `Lock to ${label} axis`, onclick: () => app.setModalAxis(a) }, label);
       bar.append(
         h('div', { class: 'mlabel' }, (m!.label !== s.kind ? `${m!.label} · ` : '') + s.describe()),
         axisBtn('x', 'X'), axisBtn('y', 'Y'), axisBtn('z', 'Z'),
@@ -434,9 +463,9 @@ export class UI {
       m!.params.forEach((p, i) => {
         bar.append(h('div', { class: 'param' },
           h('span', { class: 'pname' }, p.name),
-          h('button', { class: 'mbtn small', onclick: () => app.setParam(i, p.value - p.step) }, icon('minus', 16)),
+          h('button', { class: 'mbtn small', tip: `Decrease ${p.name.toLowerCase()}`, onclick: () => app.setParam(i, p.value - p.step) }, icon('minus', 16)),
           h('span', { class: 'pval' }, p.int ? String(p.value) : fmt(p.value, 3)),
-          h('button', { class: 'mbtn small', onclick: () => app.setParam(i, p.value + p.step) }, icon('plus', 16)),
+          h('button', { class: 'mbtn small', tip: `Increase ${p.name.toLowerCase()}`, onclick: () => app.setParam(i, p.value + p.step) }, icon('plus', 16)),
         ));
       });
       bar.append(cancel, ok, h('div', { class: 'mhint' }, `Drag in the view to adjust ${m!.params[0].name.toLowerCase()}`));
@@ -483,7 +512,7 @@ export class UI {
   private navWidget() {
     const wrap = h('div', { class: 'nav' });
     const drag = (name: string, title: string, fn: (dx: number, dy: number) => void) => {
-      const b = h('button', { class: 'navbtn', title }, icon(name, 20));
+      const b = h('button', { class: 'navbtn', tip: title }, icon(name, 20));
       let last: { x: number; y: number } | null = null;
       b.addEventListener('pointerdown', (e) => { e.preventDefault(); b.setPointerCapture(e.pointerId); last = { x: e.clientX, y: e.clientY }; b.classList.add('on'); });
       b.addEventListener('pointermove', (e) => { if (!last) return; fn(e.clientX - last.x, e.clientY - last.y); last = { x: e.clientX, y: e.clientY }; });
@@ -492,7 +521,7 @@ export class UI {
       b.addEventListener('pointercancel', end);
       return b;
     };
-    const tapBtn = (name: string, title: string, fn: (b: HTMLElement) => void) => { const b: HTMLButtonElement = h('button', { class: 'navbtn', title, onclick: () => fn(b) }, icon(name, 20)); return b; };
+    const tapBtn = (name: string, title: string, fn: (b: HTMLElement) => void) => { const b: HTMLButtonElement = h('button', { class: 'navbtn', tip: title, onclick: () => fn(b) }, icon(name, 20)); return b; };
     wrap.append(
       drag('orbit', 'Orbit (drag)', (dx, dy) => { this.app.vp.cam.orbit(dx, dy); this.app.redraw(); }),
       drag('pan', 'Pan (drag)', (dx, dy) => { this.app.vp.cam.pan(dx, dy, this.app.vp.height); this.app.redraw(); }),
@@ -531,7 +560,7 @@ export class UI {
     },
       h('span', { class: 'oname' }, o.name),
       h('span', { class: 'ostat' }, `${o.mesh.faces.length}f`),
-      h('button', { class: 'iconbtn small', title: o.visible ? 'Hide' : 'Show', onclick: (e: Event) => { e.stopPropagation(); app.record('Visibility'); o.visible = !o.visible; app.changed(); } }, icon(o.visible ? 'eye' : 'eyeoff', 18)),
+      h('button', { class: 'iconbtn small', tip: o.visible ? 'Hide' : 'Show', onclick: (e: Event) => { e.stopPropagation(); app.record('Visibility'); o.visible = !o.visible; app.changed(); } }, icon(o.visible ? 'eye' : 'eyeoff', 18)),
     )));
     this.panel.append(sec('Scene', list));
 
@@ -564,7 +593,7 @@ export class UI {
           h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: md.enabled, onchange: (e: Event) => { app.record('Toggle modifier'); md.enabled = (e.target as HTMLInputElement).checked; app.changed(); } }), md.type === 'mirror' ? 'Mirror' : 'Subdivision'),
           h('div', { class: 'spacer' }),
           h('button', { class: 'tiny', onclick: () => app.applyModifiers(md.id) }, 'Apply'),
-          h('button', { class: 'iconbtn small', title: 'Remove', onclick: () => { app.record('Remove modifier'); a.modifiers = a.modifiers.filter((x) => x !== md); app.changed(); } }, icon('trash', 16)),
+          h('button', { class: 'iconbtn small', tip: 'Remove modifier', onclick: () => { app.record('Remove modifier'); a.modifiers = a.modifiers.filter((x) => x !== md); app.changed(); } }, icon('trash', 16)),
         );
         let body: Node;
         if (md.type === 'mirror') {
@@ -654,7 +683,28 @@ export class UI {
       i.addEventListener('change', () => { const x = parseFloat(i.value); if (isFinite(x) && x > 0) set(x); });
       return h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, label), i);
     };
+    // appearance: hue + tint (live)
+    const hue = h('input', { type: 'range', class: 'hue-slider', min: '0', max: '359', step: '1', value: String(this.theme.hue), 'aria-label': 'Hue' }) as HTMLInputElement;
+    const tint = h('input', { type: 'range', class: 'tint-slider', min: '0', max: '1', step: '0.05', value: String(this.theme.tint), 'aria-label': 'Tint' }) as HTMLInputElement;
+    const swatches = h('div', { class: 'swatches' });
+    const drawSwatches = () => {
+      clear(swatches);
+      swatches.append(...HUE_PRESETS.map((hv) => h('button', { class: `swatch${this.theme.hue === hv && this.theme.tint > 0 ? ' on' : ''}`, tip: `Hue ${hv}°`, style: `background:hsl(${hv} 85% 62%)`, onclick: () => { hue.value = String(hv); if (+tint.value === 0) tint.value = '1'; upd(); } })),
+        h('button', { class: `swatch${this.theme.tint === 0 ? ' on' : ''}`, tip: 'Neutral grey', style: 'background:hsl(0 0% 62%)', onclick: () => { tint.value = '0'; upd(); } }));
+    };
+    const upd = () => { this.setTheme({ hue: +hue.value, tint: +tint.value }); drawSwatches(); };
+    hue.addEventListener('input', upd);
+    tint.addEventListener('input', upd);
+    drawSwatches();
+    const preview = h('div', { class: 'preview-row' }, ...['--bg', '--bg2', '--bg3', '--bg4', '--fg2', '--accent'].map((v) => h('span', { style: `background:var(${v})` })));
     const body = h('div', { class: 'settings' },
+      h('h4', {}, 'Appearance'),
+      h('p', { class: 'note' }, 'The interface is monochrome in one hue of your choice. Axis colours, destructive actions, seams and selection keep their functional colours.'),
+      h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Hue'), hue),
+      h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Tint'), tint),
+      swatches,
+      preview,
+      h('div', { class: 'row' }, h('button', { class: 'tiny', onclick: () => { hue.value = String(DEFAULT_THEME.hue); tint.value = String(DEFAULT_THEME.tint); upd(); } }, 'Reset to default')),
       h('h4', {}, 'Stylus & touch'),
       h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, 'Palm rejection'), seg([['auto', 'Auto'], ['on', 'Pen only'], ['off', 'Off']], g.palmRejection, (v) => { g.palmRejection = v; s.palmRejection = v; if (v === 'off' || v === 'auto') app.gestures.resetPen(); this.renderStatus(); })),
       h('p', { class: 'note' }, 'Auto: once an active pen is used, fingers only navigate (orbit / pan / zoom) and the pen does all editing. Pen barrel button drag orbits.'),
@@ -671,7 +721,8 @@ export class UI {
 
   private helpDialog() {
     const rows: [string, string][] = [
-      ['Touch: tap', 'Select (Set / + / − chips choose how)'],
+      ['Long-press any icon', 'Shows its name (hover with a pen or mouse works too)'],
+      ['Touch: tap', 'Select (replace / add / remove chips choose how)'],
       ['Touch: double-tap', 'Object → enter Edit · Edge → loop · Vertex/face → linked'],
       ['Touch: drag empty', 'Orbit'],
       ['Touch: drag vertex', 'Move it (tweak)'],
