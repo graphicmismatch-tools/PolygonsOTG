@@ -79,6 +79,8 @@ export class Gestures {
   private multi = { start: 0, maxCount: 0, moved: false, fired: false, lastDist: 0, lastCx: 0, lastCy: 0 };
   settings: GestureSettings = { palmRejection: 'auto', longPressMs: 380 };
   /** True while a pen is known to be in use (for UI hints). */
+  /** True while two or more fingers are down (pinch). */
+  get multiTouch() { return [...this.tracks.values()].filter((t) => t.role === 'nav2').length >= 2; }
   get penMode() { return this.settings.palmRejection === 'on' || (this.settings.palmRejection === 'auto' && this.penSeenAt > 0); }
 
   constructor(private el: HTMLElement, private cb: GestureCallbacks) {

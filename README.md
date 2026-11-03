@@ -8,8 +8,8 @@ each with a smaller scope:
 | Workspace | What it covers |
 |-----------|----------------|
 | **Object** | Add primitives (cube, plane, grid, circle, UV/ico sphere, cylinder, cone, torus, single vertex). Move, rotate and scale with a gizmo or a drag-anywhere tool. Duplicate, delete, join, apply transforms, set origin, flat/smooth shading. Outliner, numeric transform fields, **Mirror** and **Subdivision Surface** modifiers, and a material (colour, roughness, metalness, image texture). |
-| **Edit** | Vertex, edge and face selection with tap, box, loop, ring, linked, grow, shrink and invert. Direct vertex dragging. Extrude (region, edge or vertex), inset, loop cut and slide (multiple cuts), subdivide, connect vertices, merge (at centre or by distance), fill (makes a face or edge), bridge edge loops, delete or dissolve, duplicate, separate, split, smooth, triangulate, flip and recalculate normals. Also X-mirror editing, snapping, X-ray, and marking seams. |
-| **Sculpt** | A small sculpt mode for shaping. It has 8 brushes: draw, clay, inflate, smooth, flatten, pinch, crease and grab. Pen pressure can control strength and/or radius. Also X symmetry, falloff curves, and a button that subdivides the mesh to add resolution. |
+| **Edit** | Vertex, edge and face selection with tap, box, loop, ring, linked, grow, shrink and invert. Direct vertex dragging. Extrude (region, edge or vertex), inset, loop cut and slide (multiple cuts), **bevel** (edges or vertices, with width and rounded segments), **knife** (drag a cut line across faces, snapping to vertices), subdivide, connect vertices, merge (at centre or by distance), fill (makes a face or edge), bridge edge loops, delete or dissolve, duplicate, separate, split, smooth, triangulate, flip and recalculate normals. Also **proportional editing** (smooth, sphere, linear, sharp or constant falloff, with a radius you can change while transforming), X-mirror editing, snapping, X-ray, and marking seams. |
+| **Sculpt** | A small sculpt mode for shaping. It has 8 brushes: draw, clay, inflate, smooth, flatten, pinch, crease and grab. Pen pressure can control strength and/or radius. **Dynamic topology** splits long edges under the brush while you sculpt, so detail appears where you paint. You can set the detail size, and this works on any low-poly base. Also X symmetry, falloff curves, and a button that subdivides the whole mesh. |
 | **UV** | Split view: the 3D edit view next to a 2D UV editor. Seam-based **LSCM conformal unwrap**, smart UV project, and projection from view, cube, cylinder or sphere. Island packing. Move, rotate and scale UVs (with axis lock), flip, rotate 90°, weld, align and fit. Island selection, a checker preview, image textures, and UV layout PNG export. |
 
 You can **import** OBJ, glTF/GLB and STL files. You can **export** OBJ (with UVs and normals), GLB (with materials and textures), STL, and PNG screenshots. Projects save as `.potg` files and autosave to the device.
@@ -93,7 +93,8 @@ bundle and the APK as downloadable artifacts.
 
 ## Scope notes / limitations
 
-- Sculpting works directly on the mesh vertices. There is no dynamic topology or multires, so subdivide first if you want more detail. Modifiers are hidden while you sculpt.
-- Meshes up to a few tens of thousands of faces stay responsive on recent phones and tablets.
+- Dynamic topology only refines: it never merges or collapses edges. Use *Smooth* or lower the detail if an area gets too dense. Above 400k faces it pauses so the device stays responsive. Modifiers are hidden while you sculpt.
+- Meshes up to a few tens of thousands of faces stay responsive in edit mode on recent phones and tablets.
 - LSCM needs seams on closed shapes. A closed part without seams falls back to smart projection, and the status bar tells you when that happens.
-- Bevel, knife and proportional editing are not implemented yet.
+- Bevel works on edges that have a face on both sides. The width is the distance moved along the neighbouring edges, and corners where three or more bevelled edges meet are closed with a flat patch.
+- The knife cuts with straight lines from edge to edge. Cuts that start or end in the middle of a face are not supported.

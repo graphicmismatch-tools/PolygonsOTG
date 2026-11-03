@@ -910,3 +910,69 @@ export function bridgeEdgeLoops(m: Mesh): boolean {
   m.flush('face');
   return true;
 }
+
+/** Split a face between two of its (non-adjacent) vertices. Returns true if a face was split. */
+export function connectPair(m: Mesh, a: number, b: number): boolean {
+  if (a === b) return false;
+  for (let fi = 0; fi < m.faces.length; fi++) {
+    const f = m.faces[fi];
+    const n = f.v.length;
+    const i = f.v.indexOf(a), j = f.v.indexOf(b);
+    if (i < 0 || j < 0) continue;
+    if ((i + 1) % n === j || (j + 1) % n === i) return false; // already an edge
+    const lo = Math.min(i, j), hi = Math.max(i, j);
+    m.faces[fi] = { v: f.v.slice(lo, hi + 1), uv: f.uv.slice(lo, hi + 1) };
+    m.faces.push({ v: [...f.v.slice(hi), ...f.v.slice(0, lo + 1)], uv: [...f.uv.slice(hi), ...f.uv.slice(0, lo + 1)] });
+    return true;
+  }
+  return false;
+}
+
+export interface KnifeHit {
+  /** Hit an existing vertex… */
+  vert?: number;
+  /** …or an edge (a,b) at parameter t from a. */
+  a?: number; b?: number; t?: number;
+}
+
+/**
+ * Knife: insert vertices at the given hits (ordered along the cut line) and
+ * split every face that two consecutive hits share. New cut edges are selected.
+ */
+export function knifeCut(m: Mesh, hits: KnifeHit[]): number {
+  const pts: number[] = [];
+  const done = new Map<string, number>();
+  for (const h of hits) {
+    let v: number;
+    if (h.vert !== undefined) v = h.vert;
+    else {
+      const a = h.a!, b = h.b!, t = h.t!;
+      if (t < 0.02) v = a;
+      else if (t > 0.98) v = b;
+      else {
+        const k = `${ekey(a, b)}@${t.toFixed(4)}`;
+        const prev = done.get(k);
+        if (prev !== undefined) v = prev;
+        else {
+          v = m.addVert(lerp(m.verts[a], m.verts[b], t));
+          splitEdgeInFaces(m, a, b, v, t);
+          if (m.seams.has(ekey(a, b))) { m.seams.delete(ekey(a, b)); m.seams.add(ekey(a, v)); m.seams.add(ekey(v, b)); }
+          done.set(k, v);
+          m.changed();
+        }
+      }
+    }
+    if (pts[pts.length - 1] !== v) pts.push(v);
+  }
+  let cuts = 0;
+  const cutEdges = new Set<string>();
+  for (let i = 0; i + 1 < pts.length; i++) {
+    if (connectPair(m, pts[i], pts[i + 1])) { cuts++; cutEdges.add(ekey(pts[i], pts[i + 1])); }
+  }
+  m.changed();
+  m.cleanup();
+  m.clearSelection();
+  m.selE = cutEdges;
+  m.flush('edge');
+  return cuts;
+}

@@ -10,12 +10,13 @@ import { V3 } from './core/vec';
 import { Viewport, AppMode, v3 } from './render/viewport';
 import { Gizmo, GizmoKind, GizmoHandle, segDist } from './render/overlay';
 import { Gestures, PInfo, ToolHandler } from './input';
-import { TransformSession, TKind, Axis, vertTarget, objTarget, Snap } from './modes/transform';
+import { TransformSession, TKind, Axis, vertTarget, objTarget, Snap, Falloff, buildProp, setPropRadius } from './modes/transform';
+import { bevel as bevelOp } from './core/bevel';
 import { SculptStroke, BrushSettings, defaultBrush } from './modes/sculpt';
 import { kvGet, kvSet } from './io/files';
 
 export type SelOp = 'set' | 'add' | 'sub';
-export type EditTool = 'select' | 'loopcut';
+export type EditTool = 'select' | 'loopcut' | 'knife';
 
 export interface Settings {
   mirrorX: boolean;
@@ -26,6 +27,7 @@ export interface Settings {
   touchOrbit: boolean;
   panelOpen: boolean;
   leftHanded: boolean;
+  proportional: { enabled: boolean; falloff: Falloff; radius: number };
 }
 
 export interface ParamDef { name: string; value: number; min: number; max: number; step: number; drag: number; int?: boolean }
@@ -58,11 +60,13 @@ export class App {
     touchOrbit: true,
     panelOpen: false,
     leftHanded: false,
+    proportional: { enabled: false, falloff: 'smooth', radius: 1 },
   };
   hover: { x: number; y: number; type: PInfo['type'] } | null = null;
   private box: { x0: number; y0: number; x1: number; y1: number } | null = null;
   private activeHandle: GizmoHandle | null = null;
   private loopPreview: [V3, V3][] | null = null;
+  private knifeLine: { x0: number; y0: number; x1: number; y1: number; hits: { x: number; y: number }[] } | null = null;
   private preselect: { kind: 'vert' | 'edge' | 'face'; id: number | string } | null = null;
   private listeners = new Map<string, Set<Listener>>();
   private keyInvert = false;
@@ -242,6 +246,10 @@ export class App {
 
   /* ================================================================ navigation */
   zoomAt(f: number, x: number, y: number) {
+    if (this.modal?.kind === 'transform' && this.modal.session.target.kind === 'verts' && this.modal.session.target.prop && x >= 0 && !this.gestures.multiTouch) {
+      this.scalePropRadius(1 / f);
+      return;
+    }
     const cam = this.vp.cam;
     const before = cam.distance;
     cam.distance = Math.min(2000, Math.max(0.02, cam.distance * f));
@@ -336,7 +344,10 @@ export class App {
     if (this.isEditLike && a) {
       const vs = ops.selectedVerts(a.mesh);
       if (!vs.length) return null;
-      return vertTarget(a, vs, this.settings.mirrorX ? ops.mirrorMap(a.mesh) : null);
+      const t = vertTarget(a, vs, this.settings.mirrorX ? ops.mirrorMap(a.mesh) : null);
+      const pr = this.settings.proportional;
+      if (pr.enabled) t.prop = buildProp(a, vs, this.vp.objectMatrix(a), pr.radius, pr.falloff, pr.radius * 3);
+      return t;
     }
     if (this.mode === 'object') {
       const objs = this.selectedObjects();
@@ -348,6 +359,30 @@ export class App {
 
   setModalAxis(a: Axis) {
     if (this.modal?.kind === 'transform') { this.modal.session.setAxis(a); this.emit('modal'); }
+  }
+
+  /** Scale the proportional-editing radius (live during a transform). */
+  scalePropRadius(f: number) {
+    const pr = this.settings.proportional;
+    pr.radius = Math.min(1000, Math.max(0.001, pr.radius * f));
+    const m = this.modal;
+    if (m?.kind === 'transform' && m.session.target.kind === 'verts' && m.session.target.prop) {
+      const t = m.session.target;
+      if (pr.radius > t.prop!.maxRadius) {
+        // distances were computed for a smaller radius: restore, recompute, re-apply
+        m.session.cancel();
+        t.prop = buildProp(t.obj, t.verts, this.vp.objectMatrix(t.obj), pr.radius, pr.falloff, pr.radius * 3);
+      } else setPropRadius(t.prop!, pr.radius);
+      m.session.apply();
+    }
+    this.emit('modal');
+    this.vp.requestRender();
+  }
+
+  setPropFalloff(f: Falloff | 'off') {
+    const pr = this.settings.proportional;
+    if (f === 'off') pr.enabled = false; else { pr.enabled = true; pr.falloff = f; }
+    this.emit('mode');
   }
 
   confirmModal() {
@@ -444,6 +479,9 @@ export class App {
     // 2. sculpt
     if (this.mode === 'sculpt') return this.beginSculpt(x, y, p);
 
+    // 2b. knife: any single-pointer drag draws a cut line
+    if (this.isEditLike && this.tool === 'knife') return this.knifeHandler(x, y, p);
+
     // 3. gizmo
     if (this.settings.gizmo !== 'none') {
       const h = this.gizmo.hit(x, y, p.type === 'touch' ? 26 : 14);
@@ -528,7 +566,12 @@ export class App {
     this.record(`Sculpt ${this.brush.type}`);
     const stroke = new SculptStroke(a, this.vp, this.brush,
       () => { this.redraw(); },
-      (changed) => { if (!changed) this.history.cancelLast(); this.changed(); },
+      (changed) => {
+        if (!changed) this.history.cancelLast();
+        else if (stroke.limitHit) this.status('Dynamic topology paused: face limit reached');
+        else if (stroke.added) this.status(`+${stroke.added} faces · ${a.mesh.faces.length} total`);
+        this.changed();
+      },
       () => { this.revertLast(); },
       () => this.keyInvert,
     );
@@ -572,6 +615,7 @@ export class App {
       if (k) this.loopCutAt(k);
       return;
     }
+    if (this.tool === 'knife') return;
     this.selectAt(x, y, p, op, count);
   }
 
@@ -836,6 +880,31 @@ export class App {
           ctx.beginPath(); ctx.moveTo(s1.x, s1.y); ctx.lineTo(s2.x, s2.y); ctx.stroke();
         }
       }
+    }
+    // knife line
+    if (this.knifeLine) {
+      const k = this.knifeLine;
+      ctx.strokeStyle = '#ffe14d';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(k.x0, k.y0); ctx.lineTo(k.x1, k.y1); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#ffe14d';
+      for (const h of k.hits) ctx.fillRect(h.x - 3.5, h.y - 3.5, 7, 7);
+    }
+    // proportional editing radius
+    if (this.modal?.kind === 'transform' && this.modal.session.target.kind === 'verts' && this.modal.session.target.prop) {
+      const s = this.modal.session;
+      const c = s.pivot.clone().applyMatrix4(s.matrix());
+      const pc = this.vp.project(c);
+      const right = new THREE.Vector3().setFromMatrixColumn(this.vp.cam.camera.matrixWorld, 0);
+      const pe = this.vp.project(c.clone().addScaledVector(right, this.settings.proportional.radius));
+      const r = Math.hypot(pe.x - pc.x, pe.y - pc.y);
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.arc(pc.x, pc.y, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
     }
     // loop cut preview
     if (a && this.loopPreview) {
@@ -1113,6 +1182,99 @@ export class App {
     this.startParamOp('Subdivide', [{ name: 'Smooth', value: 0, min: 0, max: 1, step: 0.1, drag: 0.004 }], (m, v) => { ops.subdivideFaces(m); if (v[0] > 0) ops.smoothVerts(m, [...m.selV], v[0], 1); });
   }
 
+  /** Bevel selected edges (or vertices in vertex mode when no edges are selected). */
+  bevel(vertexOnly?: boolean) {
+    const a = this.editObj;
+    if (!a) return;
+    const m = a.mesh;
+    const vOnly = vertexOnly ?? (this.selectMode === 'vert' && m.selE.size === 0);
+    if (vOnly ? !m.selV.size : !m.selE.size) { this.status(vOnly ? 'Select vertices to bevel' : 'Select edges to bevel'); return; }
+    // default width: 15% of the average selected edge length
+    let tot = 0, n = 0;
+    for (const k of m.selE) { const [x, y] = parseKey(k); const p = m.verts[x], q = m.verts[y]; tot += Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]); n++; }
+    if (!n) for (const v of m.selV) for (const u of m.vertNeighbors(v)) { const p = m.verts[v], q = m.verts[u]; tot += Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]); n++; }
+    const base = n ? tot / n : 1;
+    const w0 = Math.round(base * 0.15 * 1000) / 1000 || 0.05;
+    this.startParamOp(vOnly ? 'Bevel Vertices' : 'Bevel', [
+      { name: 'Width', value: w0, min: 0, max: base * 10, step: Math.max(0.001, Math.round(base * 0.02 * 1000) / 1000), drag: Math.max(0.0005, this.vp.cam.worldPerPixel(this.vp.height) * 0.5) },
+      { name: 'Segments', value: 1, min: 1, max: 12, step: 1, drag: 0.03, int: true },
+    ], (mm, v) => { bevelOp(mm, { width: v[0], segments: v[1], vertexOnly: vOnly }); });
+    this.selectMode = 'face';
+    this.emit('mode');
+  }
+
+  /** Knife: drag a straight line across the mesh; faces it crosses are cut. */
+  private knifeHandler(x: number, y: number, p: PInfo): ToolHandler {
+    const r = this.pickRadius(p);
+    const snapV = this.pickVertex(x, y, r);
+    const start = snapV >= 0 ? this.screenOf(snapV) : { x, y };
+    this.knifeLine = { x0: start.x, y0: start.y, x1: start.x, y1: start.y, hits: [] };
+    let cur = { x, y };
+    const update = (mx: number, my: number, mp: PInfo) => {
+      const ev = this.pickVertex(mx, my, this.pickRadius(mp));
+      cur = ev >= 0 ? this.screenOf(ev) : { x: mx, y: my };
+      const hits = this.knifeHits(start.x, start.y, cur.x, cur.y, snapV, ev);
+      this.knifeLine = { x0: start.x, y0: start.y, x1: cur.x, y1: cur.y, hits: hits.map((h) => ({ x: h.sx, y: h.sy })) };
+      this.vp.requestRender();
+    };
+    return {
+      move: (mx, my, mp) => update(mx, my, mp),
+      end: (ex, ey, ep) => {
+        update(ex, ey, ep);
+        const ev = this.pickVertex(ex, ey, this.pickRadius(ep));
+        const hits = this.knifeHits(start.x, start.y, cur.x, cur.y, snapV, ev);
+        this.knifeLine = null;
+        if (hits.length < 2) { this.vp.requestRender(); if (Math.hypot(ex - x, ey - y) > 8) this.status('Knife: the line must cross at least two edges of a face'); return; }
+        let cuts = 0;
+        this.editOp('Knife', (m) => { cuts = ops.knifeCut(m, hits.map((h) => h.hit)); if (!cuts) { this.status('Knife: nothing to cut'); return false; } });
+        if (cuts) { this.selectMode = 'edge'; this.emit('mode'); this.status(`Knife: ${cuts} face${cuts > 1 ? 's' : ''} cut`); }
+      },
+      cancel: () => { this.knifeLine = null; this.vp.requestRender(); },
+    };
+  }
+
+  private screenOf(v: number) {
+    const a = this.editObj!;
+    const s = this.vp.project(v3(a.mesh.verts[v]).applyMatrix4(this.vp.objectMatrix(a)));
+    return { x: s.x, y: s.y };
+  }
+
+  /** Intersections of the screen segment with visible mesh edges, ordered along the line. */
+  private knifeHits(x0: number, y0: number, x1: number, y1: number, startV: number, endV: number) {
+    const a = this.editObj!;
+    const m = a.mesh;
+    const P = this.projected()!;
+    const M = this.vp.objectMatrix(a);
+    const out: { s: number; sx: number; sy: number; hit: ops.KnifeHit }[] = [];
+    if (startV >= 0) out.push({ s: 0, sx: x0, sy: y0, hit: { vert: startV } });
+    if (endV >= 0 && endV !== startV) out.push({ s: 1, sx: x1, sy: y1, hit: { vert: endV } });
+    const dx = x1 - x0, dy = y1 - y0;
+    if (Math.hypot(dx, dy) < 4) return out;
+    for (const e of m.edges) {
+      if (e.a === startV || e.b === startV || e.a === endV || e.b === endV) continue;
+      const ax = P.pts[e.a * 2], ay = P.pts[e.a * 2 + 1], bx = P.pts[e.b * 2], by = P.pts[e.b * 2 + 1];
+      const ex = bx - ax, ey = by - ay;
+      const den = dx * ey - dy * ex;
+      if (Math.abs(den) < 1e-9) continue;
+      const s = ((ax - x0) * ey - (ay - y0) * ex) / den;
+      const u = ((ax - x0) * dy - (ay - y0) * dx) / den;
+      if (s < 0 || s > 1 || u < 0 || u > 1) continue;
+      const sx = x0 + dx * s, sy = y0 + dy * s;
+      // perspective-correct parameter: closest point on the 3D edge to the view ray
+      const A = v3(m.verts[e.a]).applyMatrix4(M), B = v3(m.verts[e.b]).applyMatrix4(M);
+      const ray = this.vp.ray(sx, sy).ray;
+      const t = closestOnSegment(ray.origin, ray.direction, A, B);
+      const W = A.clone().lerp(B, t);
+      if (!this.vp.settings.xray && !this.vp.isVisible(W)) continue;
+      if (t < 0.02) out.push({ s, sx, sy, hit: { vert: e.a } });
+      else if (t > 0.98) out.push({ s, sx, sy, hit: { vert: e.b } });
+      else out.push({ s, sx, sy, hit: { a: e.a, b: e.b, t } });
+    }
+    out.sort((p, q) => p.s - q.s);
+    // drop duplicate consecutive vertex hits
+    return out.filter((h, i) => i === 0 || h.hit.vert === undefined || h.hit.vert !== out[i - 1].hit.vert);
+  }
+
   merge(at: 'center' | 'first' = 'center') { this.editOp('Merge', (m) => { if (m.selV.size < 2) { this.status('Select 2+ vertices'); return false; } ops.mergeAtCenter(m, at); }); }
   mergeByDistance() {
     const a = this.editObj;
@@ -1248,6 +1410,8 @@ export class App {
       if (e.key === 'Escape') { this.cancelModal(); return; }
       if (e.key === 'Enter') { this.confirmModal(); return; }
       if (this.modal.kind === 'transform' && (k === 'x' || k === 'y' || k === 'z')) { this.setModalAxis(k as Axis); return; }
+      if (this.modal.kind === 'transform' && (e.key === '[' || e.key === 'PageDown')) { this.scalePropRadius(1 / 1.15); return; }
+      if (this.modal.kind === 'transform' && (e.key === ']' || e.key === 'PageUp')) { this.scalePropRadius(1.15); return; }
       if (this.modal.kind === 'transform' && (k === 'g' || k === 'r' || k === 's')) {
         const kind: TKind = k === 'g' ? 'move' : k === 'r' ? 'rotate' : 'scale';
         if (this.modal.session.kind !== kind) {
@@ -1283,6 +1447,9 @@ export class App {
       if (k === 'e') return this.extrude('key');
       if (k === 'i') return this.inset();
       if (k === 'r' && ctrl) { e.preventDefault(); return this.setTool(this.tool === 'loopcut' ? 'select' : 'loopcut'); }
+      if (k === 'b' && ctrl) { e.preventDefault(); return this.bevel(e.shiftKey ? true : undefined); }
+      if (k === 'k') return this.setTool(this.tool === 'knife' ? 'select' : 'knife');
+      if (k === 'o') { const pr = this.settings.proportional; pr.enabled = !pr.enabled; this.emit('mode'); this.status(`Proportional editing ${pr.enabled ? 'on' : 'off'}`); return; }
       if (k === 'm') return this.merge();
       if (k === 'f') return this.fill();
       if (k === 'j') return this.connect();
@@ -1309,4 +1476,15 @@ function pointInPoly(x: number, y: number, poly: number[][]) {
     if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
   }
   return inside;
+}
+
+/** Parameter t∈[0,1] on segment AB closest to the ray (o + s·d). */
+function closestOnSegment(o: THREE.Vector3, d: THREE.Vector3, A: THREE.Vector3, B: THREE.Vector3): number {
+  const u = B.clone().sub(A);
+  const w0 = A.clone().sub(o);
+  const a = u.dot(u), b = u.dot(d), c = d.dot(d), dd = u.dot(w0), e = d.dot(w0);
+  const den = a * c - b * b;
+  if (Math.abs(den) < 1e-12) return 0.5;
+  const t = (b * e - c * dd) / den;
+  return Math.max(0, Math.min(1, t));
 }

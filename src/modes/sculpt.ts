@@ -3,6 +3,7 @@ import { SceneObject } from '../core/scene';
 import { V3 } from '../core/vec';
 import { Viewport } from '../render/viewport';
 import { PInfo, ToolHandler } from '../input';
+import { refine } from '../core/dyntopo';
 
 export type BrushType = 'draw' | 'clay' | 'inflate' | 'smooth' | 'flatten' | 'pinch' | 'grab' | 'crease';
 
@@ -16,7 +17,14 @@ export interface BrushSettings {
   pressureRadius: boolean;
   symmetryX: boolean;
   falloff: 'smooth' | 'sphere' | 'sharp' | 'linear';
+  /** Dynamic topology: split long edges under the brush while sculpting. */
+  dyntopo: boolean;
+  /** Target edge length in screen pixels (smaller = more detail). */
+  detail: number;
 }
+
+/** Hard cap so a runaway stroke can't make the mesh unusably heavy. */
+export const DYNTOPO_FACE_LIMIT = 400000;
 
 export const BRUSHES: { type: BrushType; label: string; hint: string }[] = [
   { type: 'draw', label: 'Draw', hint: 'Push surface out along the stroke normal' },
@@ -30,7 +38,7 @@ export const BRUSHES: { type: BrushType; label: string; hint: string }[] = [
 ];
 
 export const defaultBrush = (): BrushSettings => ({
-  type: 'draw', radius: 60, strength: 0.5, invert: false, pressureStrength: true, pressureRadius: false, symmetryX: true, falloff: 'smooth',
+  type: 'draw', radius: 60, strength: 0.5, invert: false, pressureStrength: true, pressureRadius: false, symmetryX: true, falloff: 'smooth', dyntopo: true, detail: 14,
 });
 
 function falloff(kind: BrushSettings['falloff'], t: number) {
@@ -64,7 +72,11 @@ export class SculptStroke implements ToolHandler {
   private grabStartScreen = { x: 0, y: 0 };
   private localRadius = 0;
   private scaleAvg = 1;
+  private wpp = 0.01;
   changed = false;
+  /** Faces added by dynamic topology during this stroke. */
+  added = 0;
+  limitHit = false;
 
   constructor(
     private obj: SceneObject,
@@ -76,13 +88,30 @@ export class SculptStroke implements ToolHandler {
     private invertHeld: () => boolean,
   ) {
     this.mesh = obj.mesh;
-    const m = this.mesh;
-    this.neighbors = m.verts.map((_, i) => m.vertNeighbors(i));
-    this.vertFaces = m.verts.map((_, i) => m.vertFaces(i));
+    this.refreshTopology();
     this.W = vp.objectMatrix(obj);
     this.inv = this.W.clone().invert();
     const s = new THREE.Vector3(); this.W.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
     this.scaleAvg = (Math.abs(s.x) + Math.abs(s.y) + Math.abs(s.z)) / 3 || 1;
+  }
+
+  private refreshTopology() {
+    const m = this.mesh;
+    this.neighbors = m.verts.map((_, i) => m.vertNeighbors(i));
+    this.vertFaces = m.verts.map((_, i) => m.vertFaces(i));
+  }
+
+  /** Split long edges around a (local) centre; refreshes caches if topology changed. */
+  private dyntopo(c: THREE.Vector3, r: number): boolean {
+    const b = this.brush;
+    if (!b.dyntopo || b.type === 'grab' || b.type === 'smooth') return false;
+    if (this.mesh.faces.length > DYNTOPO_FACE_LIMIT) { this.limitHit = true; return false; }
+    const maxLen = (b.detail * this.wpp) / this.scaleAvg;
+    const before = this.mesh.faces.length;
+    const n = refine(this.mesh, [c.x, c.y, c.z], r * 1.05, maxLen, 300);
+    if (!n) return false;
+    this.added += this.mesh.faces.length - before;
+    return true;
   }
 
   /** Begin at screen pos; returns false if the stroke does not hit the mesh. */
@@ -113,6 +142,7 @@ export class SculptStroke implements ToolHandler {
       const d = cam.camera.position.distanceTo(world);
       wpp = (2 * d * Math.tan((cam.fov * Math.PI) / 360)) / this.vp.height;
     }
+    this.wpp = wpp;
     this.localRadius = (rpx * wpp) / this.scaleAvg;
     return this.localRadius;
   }
@@ -191,8 +221,12 @@ export class SculptStroke implements ToolHandler {
     const hit = this.vp.pickDisplay(this.obj, x, y);
     if (!hit) return;
     const r = this.radiusLocal(hit.point, p);
+    const mirrored = new THREE.Vector3(-hit.local.x, hit.local.y, hit.local.z);
+    let topo = this.dyntopo(hit.local, r);
+    if (this.brush.symmetryX) topo = this.dyntopo(mirrored, r) || topo;
+    if (topo) this.refreshTopology();
     this.dabAt(hit.local, r, p, false);
-    if (this.brush.symmetryX) this.dabAt(new THREE.Vector3(-hit.local.x, hit.local.y, hit.local.z), r, p, true);
+    if (this.brush.symmetryX) this.dabAt(mirrored, r, p, true);
     this.mesh.touch();
     this.changed = true;
   }

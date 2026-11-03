@@ -272,6 +272,8 @@ export class UI {
           this.btn('inset', 'Inset faces (I)', () => app.inset()),
           this.btn('loopcut', 'Loop cut — tap an edge', () => app.setTool(app.tool === 'loopcut' ? 'select' : 'loopcut'), { active: app.tool === 'loopcut' }),
           this.btn('subdivide', 'Subdivide', () => app.subdivide()),
+          this.btn('bevel', 'Bevel (Ctrl+B)', () => app.bevel()),
+          this.btn('knife', 'Knife — drag a cut line (K)', () => app.setTool(app.tool === 'knife' ? 'select' : 'knife'), { active: app.tool === 'knife' }),
         ),
         this.group(
           this.btn('connect', 'Connect vertices (J)', () => app.connect()),
@@ -297,6 +299,9 @@ export class UI {
             { label: 'Edge ring', action: () => app.selectRing() },
           ]),
           this.menuBtn('meshMenu', 'Mesh tools', () => [
+            { label: 'Bevel edges', hint: 'Ctrl+B', action: () => app.bevel(false) },
+            { label: 'Bevel vertices', hint: 'Ctrl+Shift+B', action: () => app.bevel(true) },
+            { separator: true, label: '' },
             { label: 'Duplicate', action: () => app.duplicateElements() },
             { label: 'Separate to object', action: () => app.separate() },
             { label: 'Split (disconnect)', action: () => app.splitSel() },
@@ -326,6 +331,7 @@ export class UI {
           this.btn('mirror', 'X symmetry', () => { b.symmetryX = !b.symmetryX; this.renderRail(); }, { active: b.symmetryX }),
         ),
         this.group(
+          this.btn('dyntopo', b.dyntopo ? 'Dynamic topology: on (adds detail)' : 'Dynamic topology: off', () => { b.dyntopo = !b.dyntopo; this.renderRail(); this.renderEditBar(); this.renderPanel(); }, { active: b.dyntopo }),
           this.btn('subdivide', 'Subdivide whole mesh', () => app.subdivideForSculpt(1)),
           this.btn('shading', app.active?.smooth ? 'Shade flat' : 'Shade smooth', () => { app.setShading(!app.active?.smooth); this.renderRail(); }, { active: !!app.active?.smooth }),
         ),
@@ -408,12 +414,21 @@ export class UI {
         chip('xray', app.vp.settings.xray, () => { app.vp.settings.xray = !app.vp.settings.xray; app.changed(); this.renderEditBar(); }, 'X-ray: see & select through'),
         chip('mirror', app.settings.mirrorX, () => { app.settings.mirrorX = !app.settings.mirrorX; this.renderEditBar(); }, 'Mirror edits across X'),
       );
+      const pr = app.settings.proportional;
+      const fall: [string, string][] = [['off', 'Off'], ['smooth', 'Smooth'], ['sphere', 'Sphere'], ['linear', 'Linear'], ['sharp', 'Sharp'], ['constant', 'Constant']];
+      const pBtn: HTMLButtonElement = h('button', { class: `chip${pr.enabled ? ' on' : ''}`, tip: pr.enabled ? `Proportional editing: ${pr.falloff} (O)` : 'Proportional editing: off (O)', onclick: () => showMenu(pBtn, [
+        ...fall.map(([f, l]) => ({ label: l, checked: f === 'off' ? !pr.enabled : pr.enabled && pr.falloff === f, action: () => { app.setPropFalloff(f as any); this.renderEditBar(); } })),
+        { separator: true, label: '' },
+        { label: `Radius: ${fmt(pr.radius, 3)}`, hint: 'adjust while transforming', disabled: true },
+      ], 'Proportional') }, icon('proportional', 20));
+      items.push(pBtn);
     }
     if (app.mode !== 'sculpt') items.push(chip('snap', app.settings.snap.enabled, () => { app.settings.snap.enabled = !app.settings.snap.enabled; this.renderEditBar(); }, 'Snap to increments'));
     if (app.mode === 'sculpt') {
       const b = app.brush;
       items.push(this.slider('radius', 'Brush radius', b.radius, 5, 300, 1, (v) => { b.radius = v; app.vp.requestRender(); }, 'px'));
       items.push(this.slider('strength', 'Brush strength', b.strength, 0.01, 1, 0.01, (v) => { b.strength = v; app.vp.requestRender(); }));
+      if (b.dyntopo) items.push(this.slider('detail', 'Detail size (smaller = finer)', b.detail, 2, 40, 1, (v) => { b.detail = v; }, 'px'));
     }
     this.editBar.append(...items);
   }
@@ -450,13 +465,19 @@ export class UI {
     if (m!.kind === 'transform') {
       const s = m!.session;
       const axisBtn = (a: Axis, label: string) => h('button', { class: `axis ${a}${s.axis === a ? ' on' : ''}`, tip: a === 'n' ? 'Along normal' : `Lock to ${label} axis`, onclick: () => app.setModalAxis(a) }, label);
-      bar.append(
+      bar.append(...([
         h('div', { class: 'mlabel' }, (m!.label !== s.kind ? `${m!.label} · ` : '') + s.describe()),
         axisBtn('x', 'X'), axisBtn('y', 'Y'), axisBtn('z', 'Z'),
         s.customAxis ? axisBtn('n', 'N') : null as any,
         this.numInput((v) => { s.setNumeric(v); }),
+        s.target.kind === 'verts' && s.target.prop ? h('div', { class: 'param' },
+          h('span', { class: 'pname', tip: 'Proportional radius (wheel or [ ] also work)', style: 'display:grid' }, icon('proportional', 16)),
+          h('button', { class: 'mbtn small', tip: 'Smaller radius', onclick: () => app.scalePropRadius(1 / 1.25) }, icon('minus', 16)),
+          h('span', { class: 'pval' }, fmt(app.settings.proportional.radius, 3)),
+          h('button', { class: 'mbtn small', tip: 'Larger radius', onclick: () => app.scalePropRadius(1.25) }, icon('plus', 16)),
+        ) : null as any,
         cancel, ok,
-      );
+      ] as (Node | null)[]).filter((x): x is Node => !!x));
       if (m!.flavor === 'button') bar.append(h('div', { class: 'mhint' }, 'Drag anywhere in the view'));
     } else {
       bar.append(h('div', { class: 'mlabel' }, m!.label));
@@ -502,8 +523,10 @@ export class UI {
     const app = this.app;
     const pen = app.gestures.penMode;
     if (app.modal || this.uv.modal) return '';
+    if (app.mode === 'sculpt' && app.brush.dyntopo) return (pen ? 'Pen sculpts' : 'Drag on mesh to sculpt') + ' · dynamic topology adds detail under the brush (Detail slider)';
     if (app.mode === 'sculpt') return pen ? 'Pen sculpts (pressure) · fingers navigate' : 'Drag on mesh to sculpt · drag off mesh to orbit · 2 fingers pan/zoom';
     if (app.tool === 'loopcut') return 'Tap an edge to insert an edge loop';
+    if (app.tool === 'knife') return 'Knife: drag a line across faces to cut · starts/ends snap to vertices · 2 fingers navigate';
     if (app.isEditLike) return pen ? 'Pen: tap select, drag empty = box, drag vertex = move · fingers navigate' : 'Tap select · drag vertex to move · hold+drag box select · 1 finger orbit · 2 fingers pan/zoom · 2-finger tap undo';
     return pen ? 'Pen: tap select, drag = box select · fingers navigate' : 'Tap select · double-tap object to edit · 1 finger orbit · 2 fingers pan/zoom';
   }
@@ -648,6 +671,8 @@ export class UI {
       check('Pen pressure → strength', b.pressureStrength, (x) => (b.pressureStrength = x)),
       check('Pen pressure → radius', b.pressureRadius, (x) => (b.pressureRadius = x)),
       check('X symmetry', b.symmetryX, (x) => (b.symmetryX = x)),
+      check('Dynamic topology (add detail while sculpting)', b.dyntopo, (x) => { b.dyntopo = x; this.renderEditBar(); }),
+      row('Detail px', range(b.detail, 2, 40, 1, (x) => (b.detail = x))),
       check('Invert (subtract)', b.invert, (x) => (b.invert = x)),
     );
   }
@@ -734,7 +759,9 @@ export class UI {
       ['Pen: pressure', 'Sculpt strength (and radius, optional)'],
       ['Pen hover', 'Pre-highlight, brush cursor, loop-cut preview'],
       ['Transform buttons', 'Then drag anywhere; X/Y/Z chips constrain; ✓ confirms'],
-      ['Keys', 'Tab edit · G/R/S + X/Y/Z · E extrude · I inset · Ctrl+R loop cut · M merge · F fill · J connect · L linked · U unwrap · A all · X delete · Shift+D duplicate · Ctrl+Z undo'],
+      ['Proportional', 'Chip or O toggles; while moving use −/+ in the bar, the mouse wheel or [ ]'],
+      ['Knife', 'Drag a straight line across faces; repeat for more cuts'],
+      ['Keys', 'Tab edit · G/R/S + X/Y/Z · E extrude · I inset · Ctrl+B bevel · K knife · O proportional · Ctrl+R loop cut · M merge · F fill · J connect · L linked · U unwrap · A all · X delete · Shift+D duplicate · Ctrl+Z undo'],
       ['Mouse', 'Left select/box · Middle orbit · Shift+Middle / Right pan · Wheel zoom'],
     ];
     dialog('Gestures & shortcuts', h('table', { class: 'help' }, rows.map(([a, b]) => h('tr', {}, h('td', {}, a), h('td', {}, b)))));

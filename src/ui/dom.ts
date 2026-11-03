@@ -91,6 +91,11 @@ const ICONS: Record<string, IconDef> = {
   meshMenu: { d: 'M14.5 6a4 4 0 00-5 5L3 17.5 6.5 21l6.5-6.5a4 4 0 005-5L15 12.5 11.5 9z' },
   seams: { d: 'M6 3a3 3 0 100 6 3 3 0 000-6zM6 15a3 3 0 100 6 3 3 0 000-6zM8.5 7.5L20 18M8.5 16.5L20 6' },
   unwrap: { d: 'M9 3h6v6h6v6h-6v6H9v-6H3V9h6z', fill: 'M9 9h6v6H9z' },
+  bevel: { d: 'M4 20V10l6-6h10v16z', bold: 'M4 10l6-6' },
+  knife: { d: 'M3 21l8.5-8.5', fill: 'M11.5 12.5L19 3l2 2-7.5 9.5z', bold: '' },
+  proportional: { d: 'M12 2.5a9.5 9.5 0 100 19 9.5 9.5 0 000-19z', fill: 'M12 7a5 5 0 100 10 5 5 0 000-10z', solid: 'M10.4 12a1.6 1.6 0 103.2 0 1.6 1.6 0 10-3.2 0' },
+  dyntopo: { d: 'M3 20L12 4l9 16zM7.5 12h9M12 20l-4.5-8M12 20l4.5-8' },
+  detail: { d: 'M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16' },
   // view toggles
   xray: { d: 'M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12L4 7.5', bold: '', fill: 'M12 12v9l-8-4.5v-9z' },
   mirror: { d: 'M12 2v2M12 7v2M12 12v2M12 17v2M12 22v0', fill: 'M9 6L3 12l6 6zM15 6l6 6-6 6z' },

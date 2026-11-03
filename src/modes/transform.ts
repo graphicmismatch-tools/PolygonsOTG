@@ -13,6 +13,36 @@ export interface VertTarget {
   orig: V3[];
   /** mirror partner for each mesh vertex (-1 none), used with X symmetry */
   mirror: Int32Array | null;
+  /** proportional editing: unselected verts with their world distance to the selection */
+  prop?: PropInfo;
+}
+
+export type Falloff = 'smooth' | 'sphere' | 'linear' | 'sharp' | 'constant';
+export interface PropInfo {
+  verts: number[];
+  orig: V3[];
+  dist: Float64Array;
+  weights: Float64Array;
+  radius: number;
+  falloff: Falloff;
+  /** distances were only computed up to this radius */
+  maxRadius: number;
+}
+
+export function falloffWeight(kind: Falloff, x: number): number {
+  if (x >= 1) return 0;
+  switch (kind) {
+    case 'constant': return 1;
+    case 'linear': return 1 - x;
+    case 'sharp': return (1 - x) * (1 - x);
+    case 'sphere': return Math.sqrt(1 - x * x);
+    default: { const t = 1 - x; return t * t * (3 - 2 * t); }
+  }
+}
+
+export function setPropRadius(p: PropInfo, radius: number) {
+  p.radius = Math.max(1e-4, radius);
+  for (let i = 0; i < p.verts.length; i++) p.weights[i] = falloffWeight(p.falloff, p.dist[i] / p.radius);
 }
 export interface ObjTarget {
   kind: 'objects';
@@ -224,8 +254,20 @@ export class TransformSession {
         if (t.mirror && Math.abs(o[0]) < 1e-4 && t.mirror[vi] === vi) v.x = 0;
         mesh.verts[vi] = [v.x, v.y, v.z];
       });
+      const touched: number[] = t.verts.slice();
+      if (t.prop) {
+        const pr = t.prop;
+        for (let i = 0; i < pr.verts.length; i++) {
+          const vi = pr.verts[i], o = pr.orig[i], w = pr.weights[i];
+          if (w <= 0) { mesh.verts[vi] = [o[0], o[1], o[2]]; continue; }
+          v.set(o[0], o[1], o[2]).applyMatrix4(L);
+          mesh.verts[vi] = [o[0] + (v.x - o[0]) * w, o[1] + (v.y - o[1]) * w, o[2] + (v.z - o[2]) * w];
+          moved.add(vi);
+          touched.push(vi);
+        }
+      }
       if (t.mirror) {
-        for (const vi of t.verts) {
+        for (const vi of touched) {
           const p = t.mirror[vi];
           if (p >= 0 && p !== vi && !moved.has(p)) { const q = mesh.verts[vi]; mesh.verts[p] = [-q[0], q[1], q[2]]; }
         }
@@ -272,10 +314,15 @@ export class TransformSession {
     if (t.kind === 'verts') {
       const mesh = t.obj.mesh;
       t.verts.forEach((vi, i) => { mesh.verts[vi] = [...t.orig[i]] as V3; });
+      if (t.prop) t.prop.verts.forEach((vi, i) => { mesh.verts[vi] = [...t.prop!.orig[i]] as V3; });
       if (t.mirror) {
-        for (const vi of t.verts) {
+        const sel = new Set(t.verts);
+        const all: [number, V3][] = t.verts.map((vi, i) => [vi, t.orig[i]]);
+        if (t.prop) t.prop.verts.forEach((vi, i) => all.push([vi, t.prop!.orig[i]]));
+        const inAll = new Set(all.map(([vi]) => vi));
+        for (const [vi, q] of all) {
           const p = t.mirror[vi];
-          if (p >= 0 && p !== vi && !t.verts.includes(p)) { const q = t.orig[t.verts.indexOf(vi)]; mesh.verts[p] = [-q[0], q[1], q[2]]; }
+          if (p >= 0 && p !== vi && !inAll.has(p) && !sel.has(p)) mesh.verts[p] = [-q[0], q[1], q[2]];
         }
       }
       mesh.touch();
@@ -301,6 +348,38 @@ const snapTo = (x: number, s: number) => Math.round(x / s) * s;
 
 export function vertTarget(obj: SceneObject, verts: number[], mirror: Int32Array | null): VertTarget {
   return { kind: 'verts', obj, verts, orig: verts.map((v) => [...obj.mesh.verts[v]] as V3), mirror };
+}
+
+/**
+ * Proportional editing data: world-space distance from every unselected
+ * vertex to the nearest selected vertex (uniform grid for speed).
+ */
+export function buildProp(obj: SceneObject, selected: number[], world: THREE.Matrix4, radius: number, falloff: Falloff, maxRadius: number): PropInfo {
+  const m = obj.mesh;
+  const sel = new Set(selected);
+  const W = m.verts.map((p) => new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(world));
+  const cell = Math.max(maxRadius / 2, 1e-4);
+  const grid = new Map<number, number[]>();
+  // numeric spatial hash; collisions only add candidates (distances are exact)
+  const key = (x: number, y: number, z: number) => ((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) | 0;
+  for (const v of selected) { const p = W[v]; const k = key(Math.floor(p.x / cell), Math.floor(p.y / cell), Math.floor(p.z / cell)); (grid.get(k) ?? grid.set(k, []).get(k)!).push(v); }
+  const reach = Math.ceil(maxRadius / cell);
+  const verts: number[] = [], dist: number[] = [];
+  for (let v = 0; v < W.length; v++) {
+    if (sel.has(v)) continue;
+    const p = W[v];
+    const cx = Math.floor(p.x / cell), cy = Math.floor(p.y / cell), cz = Math.floor(p.z / cell);
+    let best = Infinity;
+    for (let dx = -reach; dx <= reach; dx++) for (let dy = -reach; dy <= reach; dy++) for (let dz = -reach; dz <= reach; dz++) {
+      const l = grid.get(key(cx + dx, cy + dy, cz + dz));
+      if (!l) continue;
+      for (const s of l) { const d = p.distanceTo(W[s]); if (d < best) best = d; }
+    }
+    if (best <= maxRadius) { verts.push(v); dist.push(best); }
+  }
+  const info: PropInfo = { verts, orig: verts.map((v) => [...m.verts[v]] as V3), dist: Float64Array.from(dist), weights: new Float64Array(verts.length), radius, falloff, maxRadius };
+  setPropRadius(info, radius);
+  return info;
 }
 
 export function objTarget(objs: SceneObject[]): ObjTarget {
