@@ -115,7 +115,11 @@ export function openInputTest(app: App, onSettingsChanged: () => void) {
   pad.addEventListener('contextmenu', (e) => e.preventDefault());
 
   const legend = h('div', { class: 'note' }, 'stroke colour: green = pen · blue = finger · orange = mouse · width = pressure');
-  const body = h('div', { class: 'input-test' }, legend, pad, live, summary, actions);
+  const noGl = location.search.includes('stylustest')
+    ? null
+    : h('div', { class: 'row' }, h('span', { class: 'note' }, 'Pen ignored here but fine in a floating window?'),
+      h('button', { class: 'tiny', onclick: () => { (app as any).autosave?.().finally?.(() => { location.href = location.pathname + '?stylustest'; }); } }, 'Test without 3D view'));
+  const body = h('div', { class: 'input-test' }, legend, pad, live, summary, actions, noGl);
   dialog('Stylus & touch test', body);
   requestAnimationFrame(() => { resize(); renderSummary(); });
 }
