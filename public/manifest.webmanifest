@@ -1,0 +1,11 @@
+{
+  "name": "Polygons OTG",
+  "short_name": "Polygons",
+  "description": "Low-to-medium poly 3D modelling on the go",
+  "start_url": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#1b1c20",
+  "theme_color": "#1b1c20",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

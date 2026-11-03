@@ -1,0 +1,697 @@
+import { App, SelOp } from '../app';
+import { AppMode } from '../render/viewport';
+import { h, clear, icon, showMenu, MenuItem, dialog, toast } from './dom';
+import { PRIMITIVES } from '../core/primitives';
+import { BRUSHES } from '../modes/sculpt';
+import { UVEditor } from '../modes/uvEditor';
+import { SceneObject } from '../core/scene';
+import { exportOBJ, exportSTL, exportGLB, importOBJ, importGLTF, importSTL, serializeProject } from '../io/formats';
+import { saveFile, openFile, readAsDataURL, isAndroidApp } from '../io/files';
+import { Axis } from '../modes/transform';
+import { V3 } from '../core/vec';
+
+const MODES: { id: AppMode; label: string; short: string }[] = [
+  { id: 'object', label: 'Object', short: 'Obj' },
+  { id: 'edit', label: 'Edit', short: 'Edit' },
+  { id: 'sculpt', label: 'Sculpt', short: 'Sculpt' },
+  { id: 'uv', label: 'UV', short: 'UV' },
+];
+
+const deg = (r: number) => (r * 180) / Math.PI;
+const rad = (d: number) => (d * Math.PI) / 180;
+const fmt = (x: number, d = 3) => String(Math.round(x * 10 ** d) / 10 ** d);
+
+export class UI {
+  root: HTMLElement;
+  topbar!: HTMLElement;
+  rail!: HTMLElement;
+  panel!: HTMLElement;
+  view3d!: HTMLElement;
+  viewUV!: HTMLElement;
+  modalBar!: HTMLElement;
+  editBar!: HTMLElement;
+  statusEl!: HTMLElement;
+  uv!: UVEditor;
+  app!: App;
+  private panelScroll = 0;
+
+  constructor(root: HTMLElement) {
+    this.root = root;
+    this.build();
+  }
+
+  private build() {
+    const canvas = h('canvas', { class: 'gl' });
+    const overlay = h('canvas', { class: 'overlay' });
+    this.view3d = h('div', { class: 'view view3d' }, canvas, overlay);
+    const uvCanvas = h('canvas', { class: 'uvcanvas' });
+    this.viewUV = h('div', { class: 'view viewuv hidden' }, uvCanvas);
+    this.topbar = h('header', { class: 'topbar' });
+    this.rail = h('nav', { class: 'rail' });
+    this.panel = h('aside', { class: 'panel hidden' });
+    this.modalBar = h('div', { class: 'modalbar hidden' });
+    this.editBar = h('div', { class: 'editbar' });
+    this.statusEl = h('div', { class: 'status' });
+    const workspace = h('div', { class: 'workspace' }, this.view3d, this.viewUV);
+    const main = h('div', { class: 'main' }, this.rail, workspace, this.panel);
+    this.root.append(this.topbar, main);
+    this.view3d.append(this.editBar, this.modalBar, this.statusEl, this.navWidget());
+
+    this.app = new App(canvas, overlay, this.view3d);
+    this.uv = new UVEditor(uvCanvas, this.viewUV, this.app);
+    this.app.uvRedraw = () => this.uv.redraw();
+    this.uv.onModal = () => this.renderModal();
+
+    const app = this.app;
+    app.on('mode', () => { this.renderAll(); });
+    app.on('change', () => { this.renderPanel(); this.renderStatus(); this.renderEditBar(); });
+    app.on('modal', () => this.renderModal());
+    app.on('history', () => this.renderTop());
+    app.on('status', () => this.renderStatus());
+
+    const ro = new ResizeObserver(() => { app.resize(); this.uv.resize(); });
+    ro.observe(this.view3d);
+    ro.observe(this.viewUV);
+    window.addEventListener('resize', () => { app.resize(); this.uv.resize(); });
+    this.renderAll();
+  }
+
+  renderAll() {
+    this.root.classList.toggle('left-handed', this.app.settings.leftHanded);
+    this.root.dataset.mode = this.app.mode;
+    this.viewUV.classList.toggle('hidden', this.app.mode !== 'uv');
+    this.panel.classList.toggle('hidden', !this.app.settings.panelOpen);
+    this.renderTop();
+    this.renderRail();
+    this.renderEditBar();
+    this.renderPanel();
+    this.renderModal();
+    this.renderStatus();
+    requestAnimationFrame(() => { this.app.resize(); this.uv.resize(); });
+  }
+
+  /* ================================================================ top bar */
+  renderTop() {
+    const app = this.app;
+    clear(this.topbar);
+    const menuBtn = h('button', { class: 'iconbtn', title: 'Menu', onclick: () => this.mainMenu(menuBtn) }, icon('menu'));
+    const tabs = h('div', { class: 'tabs' }, MODES.map((m) => h('button', {
+      class: `tab${app.mode === m.id ? ' active' : ''}`,
+      onclick: () => app.setMode(m.id),
+    }, h('span', { class: 'long' }, m.label), h('span', { class: 'short' }, m.short))));
+    const undo = h('button', { class: 'iconbtn', title: `Undo ${app.history.undoLabel}`, disabled: !app.history.canUndo && !app.modal, onclick: () => app.undo() }, icon('undo'));
+    const redo = h('button', { class: 'iconbtn', title: 'Redo', disabled: !app.history.canRedo, onclick: () => app.redo() }, icon('redo'));
+    const panel = h('button', { class: `iconbtn${app.settings.panelOpen ? ' on' : ''}`, title: 'Properties', onclick: () => { app.settings.panelOpen = !app.settings.panelOpen; this.renderAll(); } }, icon('panel'));
+    const objName = app.active ? h('div', { class: 'objname' }, app.active.name) : null;
+    this.topbar.append(menuBtn, tabs, h('div', { class: 'spacer' }), ...(objName ? [objName] : []), undo, redo, panel);
+  }
+
+  private mainMenu(anchor: HTMLElement) {
+    const app = this.app;
+    showMenu(anchor, [
+      { label: 'New scene', action: () => dialog('New scene', h('p', {}, 'Discard the current scene and start over?'), [{ label: 'Cancel' }, { label: 'New', primary: true, action: () => app.newScene() }]) },
+      { label: 'Open project…', action: () => this.openProject() },
+      { label: 'Save project', hint: '.potg', action: () => this.saveProject() },
+      { separator: true, label: '' },
+      { label: 'Import', submenu: () => [
+        { label: 'Wavefront OBJ', action: () => this.importModel('obj') },
+        { label: 'glTF / GLB', action: () => this.importModel('glb') },
+        { label: 'STL', action: () => this.importModel('stl') },
+      ] },
+      { label: 'Export', submenu: () => [
+        { label: 'Wavefront OBJ', action: () => this.exportModel('obj') },
+        { label: 'glTF binary (GLB)', action: () => this.exportModel('glb') },
+        { label: 'STL (3D print)', action: () => this.exportModel('stl') },
+        { label: 'Screenshot PNG', action: () => this.screenshot() },
+      ] },
+      { separator: true, label: '' },
+      { label: 'Settings…', action: () => this.settingsDialog() },
+      { label: 'Gestures & shortcuts', action: () => this.helpDialog() },
+    ], 'Polygons OTG');
+  }
+
+  private exportTargets(): SceneObject[] {
+    const app = this.app;
+    const sel = app.selectedObjects();
+    return sel.length ? sel : app.scene.objects.filter((o) => o.visible);
+  }
+
+  private async saveProject() {
+    this.app.confirmModal();
+    await saveFile(`scene_${stamp()}.potg`, 'application/json', serializeProject(this.app.scene));
+    if (!isAndroidApp()) toast('Project saved');
+  }
+
+  private async openProject() {
+    const f = await openFile('.potg,.json,application/json');
+    if (!f) return;
+    try { this.app.loadProject(JSON.parse(await f.text())); toast(`Opened ${f.name}`); }
+    catch (e) { toast(`Could not open: ${(e as Error).message}`); }
+  }
+
+  private async importModel(kind: 'obj' | 'glb' | 'stl') {
+    const app = this.app;
+    const f = await openFile(kind === 'obj' ? '.obj' : kind === 'stl' ? '.stl' : '.glb,.gltf');
+    if (!f) return;
+    try {
+      app.setMode('object');
+      app.record('Import');
+      const base = f.name.replace(/\.[^.]+$/, '');
+      let added = 0;
+      if (kind === 'obj') {
+        for (const r of importOBJ(await f.text())) { app.scene.add(new SceneObject(app.scene.uniqueName(r.name || base), r.mesh)); added++; }
+      } else if (kind === 'stl') {
+        app.scene.add(new SceneObject(app.scene.uniqueName(base), importSTL(await f.arrayBuffer()))); added++;
+      } else {
+        const data = f.name.endsWith('.gltf') ? await f.text() : await f.arrayBuffer();
+        for (const r of await importGLTF(data)) {
+          const o = new SceneObject(app.scene.uniqueName(r.name || base), r.mesh);
+          o.position = r.position; o.rotation = r.rotation; o.scale = r.scale;
+          if (r.texture) o.material.texture = r.texture;
+          if (r.color) o.material.color = r.color;
+          app.scene.add(o); added++;
+        }
+      }
+      app.changed();
+      app.frameSelected();
+      toast(`Imported ${added} object${added === 1 ? '' : 's'}`);
+    } catch (e) {
+      app.history.cancelLast();
+      toast(`Import failed: ${(e as Error).message}`);
+    }
+  }
+
+  private async exportModel(kind: 'obj' | 'glb' | 'stl') {
+    const objs = this.exportTargets();
+    if (!objs.length) { toast('Nothing to export'); return; }
+    this.app.confirmModal();
+    const name = objs.length === 1 ? objs[0].name : 'scene';
+    try {
+      if (kind === 'obj') await saveFile(`${name}.obj`, 'text/plain', exportOBJ(objs));
+      else if (kind === 'stl') await saveFile(`${name}.stl`, 'model/stl', exportSTL(objs));
+      else await saveFile(`${name}.glb`, 'model/gltf-binary', await exportGLB(objs, (u) => this.app.vp.getTexture(u)));
+      if (!isAndroidApp()) toast(`Exported ${name}.${kind}`);
+    } catch (e) { toast(`Export failed: ${(e as Error).message}`); }
+  }
+
+  private async screenshot() {
+    const url = this.app.vp.snapshotPNG();
+    const blob = await (await fetch(url)).blob();
+    await saveFile(`render_${stamp()}.png`, 'image/png', blob);
+  }
+
+  /* ================================================================ left rail */
+  private btn(label: string, action: () => void, opts: { active?: boolean; title?: string; cls?: string; disabled?: boolean } = {}) {
+    return h('button', { class: `tool${opts.active ? ' active' : ''}${opts.cls ? ' ' + opts.cls : ''}`, title: opts.title ?? label, disabled: opts.disabled, onclick: action }, label);
+  }
+  private group(title: string, ...items: (HTMLElement | null)[]) {
+    return h('div', { class: 'rail-group' }, h('div', { class: 'rail-title' }, title), ...items);
+  }
+  private menuBtn(label: string, items: () => MenuItem[], title?: string) {
+    const b: HTMLButtonElement = h('button', { class: 'tool more', onclick: () => showMenu(b, items(), title ?? label) }, label);
+    return b;
+  }
+
+  renderRail() {
+    const app = this.app;
+    clear(this.rail);
+    const T = (kind: 'move' | 'rotate' | 'scale') => () => app.startTransform(kind, 'button');
+    const mode = app.mode;
+    if (mode === 'object') {
+      this.rail.append(
+        this.group('Create', this.menuBtn('Add', () => PRIMITIVES.map((p) => ({ label: p.label, action: () => app.addPrimitive(p.type) })), 'Add mesh')),
+        this.group('Transform', this.btn('Move', T('move')), this.btn('Rotate', T('rotate')), this.btn('Scale', T('scale'))),
+        this.group('Object',
+          this.btn('Duplicate', () => app.duplicateObjects()),
+          this.btn('Delete', () => app.deleteObjects(), { cls: 'danger' }),
+          this.btn('Join', () => app.joinObjects(), { title: 'Join selected into active' }),
+          this.menuBtn('Shading', () => [{ label: 'Flat', action: () => app.setShading(false) }, { label: 'Smooth', action: () => app.setShading(true) }]),
+          this.menuBtn('Apply', () => [
+            { label: 'All transforms', action: () => app.applyTransform('all') },
+            { label: 'Rotation & scale', action: () => app.applyTransform('rotscale') },
+            { label: 'Location', action: () => app.applyTransform('location') },
+          ]),
+          this.menuBtn('Origin', () => [
+            { label: 'To geometry centre', action: () => app.setOrigin('geometry') },
+            { label: 'To geometry bottom', action: () => app.setOrigin('bottom') },
+            { label: 'To view centre', action: () => app.setOrigin('cursor') },
+          ]),
+        ),
+      );
+    } else if (mode === 'edit' || mode === 'uv') {
+      if (mode === 'uv') this.rail.append(this.uvRail());
+      this.rail.append(
+        this.group('Transform', this.btn('Move', T('move')), this.btn('Rotate', T('rotate')), this.btn('Scale', T('scale'))),
+        this.group('Model',
+          this.btn('Extrude', () => app.extrude()),
+          this.btn('Inset', () => app.inset()),
+          this.btn('Loop Cut', () => app.setTool(app.tool === 'loopcut' ? 'select' : 'loopcut'), { active: app.tool === 'loopcut', title: 'Tap an edge to cut a loop across it' }),
+          this.btn('Subdivide', () => app.subdivide()),
+          this.btn('Connect', () => app.connect(), { title: 'Connect selected vertices across faces (J)' }),
+          this.btn('Merge', () => app.merge(), { title: 'Merge selected vertices at centre (M)' }),
+          this.btn('Fill', () => app.fill(), { title: 'Make face / edge from selection (F)' }),
+          this.btn('Bridge', () => app.bridge(), { title: 'Bridge two edge loops' }),
+          this.menuBtn('Delete', () => [
+            { label: 'Vertices', action: () => app.deleteElements('vert') },
+            { label: 'Edges', action: () => app.deleteElements('edge') },
+            { label: 'Faces', action: () => app.deleteElements('face') },
+            { label: 'Only faces (keep edges)', action: () => app.deleteElements('onlyfaces') },
+            { label: 'Dissolve faces', action: () => app.deleteElements('dissolve') },
+          ]),
+        ),
+        this.group('More',
+          this.menuBtn('Select', () => [
+            { label: 'All / none', hint: 'A', action: () => app.selectAll() },
+            { label: 'Invert', action: () => app.selectInvert() },
+            { label: 'Linked', hint: 'L', action: () => app.selectLinked() },
+            { label: 'Grow', action: () => app.selectGrow() },
+            { label: 'Shrink', action: () => app.selectShrink() },
+            { label: 'Edge loop', action: () => app.selectLoop() },
+            { label: 'Edge ring', action: () => app.selectRing() },
+          ]),
+          this.menuBtn('Mesh', () => [
+            { label: 'Duplicate', action: () => app.duplicateElements() },
+            { label: 'Separate to object', action: () => app.separate() },
+            { label: 'Split (disconnect)', action: () => app.splitSel() },
+            { label: 'Smooth vertices', action: () => app.smooth() },
+            { label: 'Merge by distance', action: () => app.mergeByDistance() },
+            { label: 'Triangulate', action: () => app.triangulate() },
+            { label: 'Flip normals', action: () => app.flipNormals() },
+            { label: 'Recalculate normals', action: () => app.recalcNormals() },
+            { label: 'Snap to X = 0', action: () => app.snapCenterX() },
+            { separator: true, label: '' },
+            { label: 'Add primitive', submenu: () => PRIMITIVES.map((p) => ({ label: p.label, action: () => app.addPrimitive(p.type) })) },
+          ]),
+          this.menuBtn('Seams', () => [
+            { label: 'Mark seam', action: () => app.markSeam(true) },
+            { label: 'Clear seam', action: () => app.markSeam(false) },
+            { label: 'Seams from UV islands', action: () => app.uvSeamsFromIslands() },
+          ]),
+          mode === 'edit' ? this.btn('Unwrap', () => app.uvUnwrap(), { title: 'Unwrap UVs using seams (U)' }) : null,
+        ),
+      );
+    } else if (mode === 'sculpt') {
+      const b = app.brush;
+      this.rail.append(
+        this.group('Brush', ...BRUSHES.map((br) => this.btn(br.label, () => { b.type = br.type; this.renderRail(); this.renderPanel(); }, { active: b.type === br.type, title: br.hint }))),
+        this.group('Stroke',
+          this.btn(b.invert ? 'Subtract' : 'Add', () => { b.invert = !b.invert; this.renderRail(); app.vp.requestRender(); }, { active: b.invert, title: 'Invert brush direction (or hold Ctrl)' }),
+          this.btn('Sym X', () => { b.symmetryX = !b.symmetryX; this.renderRail(); }, { active: b.symmetryX }),
+        ),
+        this.group('Mesh',
+          this.btn('Subdivide', () => app.subdivideForSculpt(1), { title: 'Smooth-subdivide the whole mesh for more detail' }),
+          this.btn(app.active?.smooth ? 'Flat' : 'Smooth', () => { app.setShading(!app.active?.smooth); this.renderRail(); }),
+        ),
+      );
+    }
+  }
+
+  private uvRail() {
+    const app = this.app, uv = this.uv;
+    return h('div', {},
+      this.group('Unwrap',
+        this.btn('Unwrap', () => app.uvUnwrap(), { title: 'Conformal unwrap using seams' }),
+        this.btn('Smart', () => app.uvSmart(), { title: 'Smart UV project (angle based)' }),
+        this.menuBtn('Project', () => [
+          { label: 'From view', action: () => app.uvProject('view') },
+          { label: 'Cube', action: () => app.uvProject('cube') },
+          { label: 'Cylinder', action: () => app.uvProject('cylinder') },
+          { label: 'Sphere', action: () => app.uvProject('sphere') },
+        ]),
+        this.btn('Pack', () => app.uvPack(), { title: 'Pack islands into 0–1' }),
+      ),
+      this.group('UV',
+        this.btn('Grab', () => uv.start('move')),
+        this.btn('Rotate', () => uv.start('rotate')),
+        this.btn('Scale', () => uv.start('scale')),
+        this.menuBtn('Tools', () => [
+          { label: 'Select all / none', action: () => uv.selectAll() },
+          { label: 'Select islands', action: () => uv.selectLinked() },
+          { separator: true, label: '' },
+          { label: 'Flip horizontally', action: () => uv.op('flipU') },
+          { label: 'Flip vertically', action: () => uv.op('flipV') },
+          { label: 'Rotate 90°', action: () => uv.op('rot90') },
+          { label: 'Weld / stitch to average', action: () => uv.op('weld') },
+          { label: 'Align horizontally', action: () => uv.op('alignV') },
+          { label: 'Align vertically', action: () => uv.op('alignU') },
+          { label: 'Fit to 0–1', action: () => uv.op('fitBounds') },
+          { separator: true, label: '' },
+          { label: 'Frame UV view', action: () => uv.fit() },
+        ]),
+        this.menuBtn('Image', () => [
+          { label: 'Load texture…', action: () => this.loadTexture() },
+          { label: 'Remove texture', action: () => this.setTexture(null), disabled: !app.active?.material.texture },
+          { label: 'Checker preview', checked: app.vp.settings.checker, action: () => { app.vp.settings.checker = !app.vp.settings.checker; app.changed(); this.renderRail(); } },
+          { label: 'Export UV layout PNG', action: () => uv.exportLayout() },
+        ]),
+      ),
+    );
+  }
+
+  /* ================================================================ edit bar (floating chips) */
+  renderEditBar() {
+    const app = this.app;
+    clear(this.editBar);
+    const chip = (content: Node | string, on: boolean, action: () => void, title: string) =>
+      h('button', { class: `chip${on ? ' on' : ''}`, title, onclick: action }, content);
+    const sep = () => h('span', { class: 'chip-sep' });
+    const edit = app.isEditLike;
+    const items: Node[] = [];
+    if (edit) {
+      items.push(
+        chip(icon('vert', 18), app.selectMode === 'vert', () => app.setSelectMode('vert'), 'Vertex select (1)'),
+        chip(icon('edge', 18), app.selectMode === 'edge', () => app.setSelectMode('edge'), 'Edge select (2)'),
+        chip(icon('face', 18), app.selectMode === 'face', () => app.setSelectMode('face'), 'Face select (3)'),
+        sep(),
+      );
+    }
+    if (app.mode !== 'sculpt') {
+      const ops: [SelOp, string, string][] = [['set', 'Set', 'Tap replaces selection'], ['add', '+', 'Tap toggles / adds to selection'], ['sub', '−', 'Tap removes from selection']];
+      for (const [id, l, t] of ops) items.push(chip(l, app.selOp === id, () => { app.selOp = id; this.renderEditBar(); }, t));
+      items.push(chip('All', false, () => app.selectAll(), 'Select all / none (A)'));
+      items.push(sep());
+      const gz = app.settings.gizmo;
+      const gl: Record<string, string> = { move: '↔ Move', rotate: '⟳ Rot', scale: '⤢ Scale', none: 'Gizmo off' };
+      const gBtn: HTMLButtonElement = h('button', { class: `chip${gz !== 'none' ? ' on' : ''}`, title: 'Gizmo', onclick: () => showMenu(gBtn, (['move', 'rotate', 'scale', 'none'] as const).map((g) => ({ label: gl[g], checked: gz === g, action: () => { app.settings.gizmo = g; this.renderEditBar(); app.vp.requestRender(); } })), 'Gizmo') }, gl[gz]);
+      items.push(gBtn);
+    }
+    if (edit) {
+      items.push(
+        chip('X-ray', app.vp.settings.xray, () => { app.vp.settings.xray = !app.vp.settings.xray; app.changed(); }, 'See and select through the mesh'),
+        chip('Mirror X', app.settings.mirrorX, () => { app.settings.mirrorX = !app.settings.mirrorX; this.renderEditBar(); }, 'Symmetric vertex transforms across X'),
+      );
+    }
+    if (app.mode !== 'sculpt') items.push(chip('Snap', app.settings.snap.enabled, () => { app.settings.snap.enabled = !app.settings.snap.enabled; this.renderEditBar(); }, 'Snap to increments'));
+    if (app.mode === 'sculpt') {
+      const b = app.brush;
+      items.push(this.slider('Radius', b.radius, 5, 300, 1, (v) => { b.radius = v; app.vp.requestRender(); }, 'px'));
+      items.push(this.slider('Strength', b.strength, 0.01, 1, 0.01, (v) => { b.strength = v; app.vp.requestRender(); }));
+    }
+    this.editBar.append(...items);
+  }
+
+  private slider(label: string, value: number, min: number, max: number, step: number, set: (v: number) => void, unit = '') {
+    const out = h('span', { class: 'slider-val' }, `${fmt(value, 2)}${unit}`);
+    const input = h('input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(value) }) as HTMLInputElement;
+    input.addEventListener('input', () => { const v = +input.value; out.textContent = `${fmt(v, 2)}${unit}`; set(v); });
+    return h('label', { class: 'chip slider' }, h('span', {}, label), input, out);
+  }
+
+  /* ================================================================ modal bar */
+  renderModal() {
+    const app = this.app;
+    const bar = this.modalBar;
+    clear(bar);
+    const uvModal = this.uv.modal;
+    const m = app.modal;
+    if (!m && !uvModal) { bar.classList.add('hidden'); this.renderTop(); return; }
+    bar.classList.remove('hidden');
+    const ok = h('button', { class: 'mbtn ok', title: 'Confirm (Enter)', onclick: () => { if (uvModal) this.uv.confirm(); else app.confirmModal(); } }, icon('check', 20));
+    const cancel = h('button', { class: 'mbtn cancel', title: 'Cancel (Esc)', onclick: () => { if (uvModal) this.uv.cancel(); else app.cancelModal(); } }, icon('close', 20));
+    if (uvModal) {
+      const axes: ('u' | 'v')[] = ['u', 'v'];
+      bar.append(
+        h('div', { class: 'mlabel' }, this.uv.describe()),
+        ...(uvModal.kind !== 'rotate' ? axes.map((a) => h('button', { class: `axis ${a === 'u' ? 'x' : 'y'}${uvModal.axis === a ? ' on' : ''}`, onclick: () => this.uv.setAxis(a) }, a.toUpperCase())) : []),
+        this.numInput((v) => this.uv.setNumeric(v)),
+        cancel, ok,
+      );
+      return;
+    }
+    if (m!.kind === 'transform') {
+      const s = m!.session;
+      const axisBtn = (a: Axis, label: string) => h('button', { class: `axis ${a}${s.axis === a ? ' on' : ''}`, onclick: () => app.setModalAxis(a) }, label);
+      bar.append(
+        h('div', { class: 'mlabel' }, (m!.label !== s.kind ? `${m!.label} · ` : '') + s.describe()),
+        axisBtn('x', 'X'), axisBtn('y', 'Y'), axisBtn('z', 'Z'),
+        s.customAxis ? axisBtn('n', 'N') : null as any,
+        this.numInput((v) => { s.setNumeric(v); }),
+        cancel, ok,
+      );
+      if (m!.flavor === 'button') bar.append(h('div', { class: 'mhint' }, 'Drag anywhere in the view'));
+    } else {
+      bar.append(h('div', { class: 'mlabel' }, m!.label));
+      m!.params.forEach((p, i) => {
+        bar.append(h('div', { class: 'param' },
+          h('span', { class: 'pname' }, p.name),
+          h('button', { class: 'mbtn small', onclick: () => app.setParam(i, p.value - p.step) }, icon('minus', 16)),
+          h('span', { class: 'pval' }, p.int ? String(p.value) : fmt(p.value, 3)),
+          h('button', { class: 'mbtn small', onclick: () => app.setParam(i, p.value + p.step) }, icon('plus', 16)),
+        ));
+      });
+      bar.append(cancel, ok, h('div', { class: 'mhint' }, `Drag in the view to adjust ${m!.params[0].name.toLowerCase()}`));
+    }
+    this.renderTop();
+  }
+
+  private numInput(apply: (v: number) => void) {
+    const inp = h('input', { class: 'num', type: 'text', inputmode: 'decimal', placeholder: '123', enterkeyhint: 'done' }) as HTMLInputElement;
+    inp.addEventListener('change', () => { const v = parseFloat(inp.value); if (isFinite(v)) apply(v); });
+    return inp;
+  }
+
+  /* ================================================================ status */
+  renderStatus() {
+    const app = this.app;
+    clear(this.statusEl);
+    const a = app.active;
+    let stats = '';
+    if (a && (app.isEditLike || app.mode === 'sculpt')) {
+      const s = a.mesh.stats();
+      stats = app.isEditLike ? `V ${a.mesh.selV.size}/${s.verts}  E ${a.mesh.selE.size}/${s.edges}  F ${a.mesh.selF.size}/${s.faces}  Tris ${s.tris}` : `V ${s.verts}  F ${s.faces}  Tris ${s.tris}`;
+    } else {
+      let v = 0, f = 0, t = 0;
+      for (const o of app.scene.objects) { const s = o.mesh.stats(); v += s.verts; f += s.faces; t += s.tris; }
+      stats = `${app.scene.objects.length} obj  V ${v}  F ${f}  Tris ${t}`;
+    }
+    const hint = app.statusText || this.hint();
+    this.statusEl.append(h('div', { class: 'stats' }, stats));
+    if (hint) this.statusEl.append(h('div', { class: 'hint' }, hint));
+  }
+
+  private hint(): string {
+    const app = this.app;
+    const pen = app.gestures.penMode;
+    if (app.modal || this.uv.modal) return '';
+    if (app.mode === 'sculpt') return pen ? 'Pen sculpts (pressure) · fingers navigate' : 'Drag on mesh to sculpt · drag off mesh to orbit · 2 fingers pan/zoom';
+    if (app.tool === 'loopcut') return 'Tap an edge to insert an edge loop';
+    if (app.isEditLike) return pen ? 'Pen: tap select, drag empty = box, drag vertex = move · fingers navigate' : 'Tap select · drag vertex to move · hold+drag box select · 1 finger orbit · 2 fingers pan/zoom · 2-finger tap undo';
+    return pen ? 'Pen: tap select, drag = box select · fingers navigate' : 'Tap select · double-tap object to edit · 1 finger orbit · 2 fingers pan/zoom';
+  }
+
+  /* ================================================================ nav widget */
+  private navWidget() {
+    const wrap = h('div', { class: 'nav' });
+    const drag = (name: string, title: string, fn: (dx: number, dy: number) => void) => {
+      const b = h('button', { class: 'navbtn', title }, icon(name, 20));
+      let last: { x: number; y: number } | null = null;
+      b.addEventListener('pointerdown', (e) => { e.preventDefault(); b.setPointerCapture(e.pointerId); last = { x: e.clientX, y: e.clientY }; b.classList.add('on'); });
+      b.addEventListener('pointermove', (e) => { if (!last) return; fn(e.clientX - last.x, e.clientY - last.y); last = { x: e.clientX, y: e.clientY }; });
+      const end = () => { last = null; b.classList.remove('on'); };
+      b.addEventListener('pointerup', end);
+      b.addEventListener('pointercancel', end);
+      return b;
+    };
+    const tapBtn = (name: string, title: string, fn: (b: HTMLElement) => void) => { const b: HTMLButtonElement = h('button', { class: 'navbtn', title, onclick: () => fn(b) }, icon(name, 20)); return b; };
+    wrap.append(
+      drag('orbit', 'Orbit (drag)', (dx, dy) => { this.app.vp.cam.orbit(dx, dy); this.app.redraw(); }),
+      drag('pan', 'Pan (drag)', (dx, dy) => { this.app.vp.cam.pan(dx, dy, this.app.vp.height); this.app.redraw(); }),
+      drag('zoom', 'Zoom (drag up/down)', (_dx, dy) => this.app.zoomAt(Math.exp(dy * 0.01), -1, -1)),
+      tapBtn('frame', 'Frame selection', () => this.app.frameSelected()),
+      tapBtn('views', 'Views', (b) => showMenu(b, [
+        { label: 'Front', hint: 'Num1', action: () => this.app.setView('front') },
+        { label: 'Back', action: () => this.app.setView('back') },
+        { label: 'Right', hint: 'Num3', action: () => this.app.setView('right') },
+        { label: 'Left', action: () => this.app.setView('left') },
+        { label: 'Top', hint: 'Num7', action: () => this.app.setView('top') },
+        { label: 'Bottom', action: () => this.app.setView('bottom') },
+        { separator: true, label: '' },
+        { label: 'Orthographic', checked: this.app.vp.cam.ortho, action: () => this.app.toggleOrtho() },
+        { label: 'Frame all', action: () => this.app.frameAll() },
+        { label: 'Wireframe', checked: this.app.vp.settings.wireframe, action: () => { this.app.vp.settings.wireframe = !this.app.vp.settings.wireframe; this.app.changed(); } },
+        { label: 'Grid', checked: this.app.vp.settings.showGrid, action: () => { this.app.vp.settings.showGrid = !this.app.vp.settings.showGrid; this.app.redraw(); } },
+      ], 'View')),
+    );
+    return wrap;
+  }
+
+  /* ================================================================ properties panel */
+  renderPanel() {
+    const app = this.app;
+    if (!app.settings.panelOpen) return;
+    // don't rebuild while the user is typing in the panel
+    if (this.panel.contains(document.activeElement) && (document.activeElement as HTMLElement).tagName === 'INPUT' && (document.activeElement as HTMLInputElement).type !== 'range') return;
+    this.panelScroll = this.panel.scrollTop;
+    clear(this.panel);
+    const sec = (title: string, ...c: (Node | null)[]) => h('section', { class: 'psec' }, h('h3', {}, title), ...c);
+    // outliner
+    const list = h('div', { class: 'outliner' }, app.scene.objects.map((o) => h('div', {
+      class: `orow${app.scene.selected.has(o.id) ? ' sel' : ''}${app.scene.activeId === o.id ? ' act' : ''}`,
+      onclick: (e: MouseEvent) => { if (app.mode !== 'object') app.setMode('object'); app.selectObject(o, e.shiftKey || app.selOp === 'add' ? 'add' : 'set'); },
+    },
+      h('span', { class: 'oname' }, o.name),
+      h('span', { class: 'ostat' }, `${o.mesh.faces.length}f`),
+      h('button', { class: 'iconbtn small', title: o.visible ? 'Hide' : 'Show', onclick: (e: Event) => { e.stopPropagation(); app.record('Visibility'); o.visible = !o.visible; app.changed(); } }, icon(o.visible ? 'eye' : 'eyeoff', 18)),
+    )));
+    this.panel.append(sec('Scene', list));
+
+    const a = app.active;
+    if (app.mode === 'sculpt') this.panel.append(this.brushSection());
+    if (a) {
+      // object properties
+      const name = h('input', { class: 'text', value: a.name }) as HTMLInputElement;
+      name.addEventListener('change', () => { app.record('Rename'); a.name = name.value || a.name; app.changed(); this.renderTop(); });
+      const vec = (label: string, get: () => V3, set: (v: V3) => void, conv = (x: number) => x, inv = (x: number) => x) => {
+        const v = get();
+        return h('div', { class: 'vecrow' }, h('span', { class: 'vlabel' }, label), ...[0, 1, 2].map((i) => {
+          const inp = h('input', { class: `num ax${i}`, type: 'text', inputmode: 'decimal', value: fmt(conv(v[i])) }) as HTMLInputElement;
+          inp.addEventListener('change', () => { const x = parseFloat(inp.value); if (!isFinite(x)) return; app.record(label); const nv = [...get()] as V3; nv[i] = inv(x); set(nv); app.changed(); });
+          return inp;
+        }));
+      };
+      this.panel.append(sec('Object',
+        h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Name'), name),
+        vec('Location', () => a.position, (v) => (a.position = v)),
+        vec('Rotation°', () => a.rotation, (v) => (a.rotation = v), deg, rad),
+        vec('Scale', () => a.scale, (v) => (a.scale = v)),
+        h('div', { class: 'row' },
+          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: a.smooth, onchange: (e: Event) => app.setShading((e.target as HTMLInputElement).checked) }), 'Smooth shading'),
+        ),
+      ));
+      // modifiers
+      const mods = h('div', {}, a.modifiers.map((md) => {
+        const head = h('div', { class: 'modhead' },
+          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: md.enabled, onchange: (e: Event) => { app.record('Toggle modifier'); md.enabled = (e.target as HTMLInputElement).checked; app.changed(); } }), md.type === 'mirror' ? 'Mirror' : 'Subdivision'),
+          h('div', { class: 'spacer' }),
+          h('button', { class: 'tiny', onclick: () => app.applyModifiers(md.id) }, 'Apply'),
+          h('button', { class: 'iconbtn small', title: 'Remove', onclick: () => { app.record('Remove modifier'); a.modifiers = a.modifiers.filter((x) => x !== md); app.changed(); } }, icon('trash', 16)),
+        );
+        let body: Node;
+        if (md.type === 'mirror') {
+          body = h('div', { class: 'row seg' }, ['X', 'Y', 'Z'].map((l, i) => h('button', { class: `segbtn${md.axis === i ? ' on' : ''}`, onclick: () => { app.record('Mirror axis'); md.axis = i as 0 | 1 | 2; app.changed(); } }, l)));
+        } else {
+          body = h('div', { class: 'row seg' }, h('span', { class: 'vlabel' }, 'Levels'), [1, 2, 3].map((l) => h('button', { class: `segbtn${md.levels === l ? ' on' : ''}`, onclick: () => { app.record('Subdiv levels'); md.levels = l; app.changed(); } }, String(l))));
+        }
+        return h('div', { class: 'mod' }, head, body);
+      }));
+      const addMod: HTMLButtonElement = h('button', { class: 'tiny', onclick: () => showMenu(addMod, [
+        { label: 'Mirror', action: () => app.addModifier('mirror') },
+        { label: 'Subdivision surface', action: () => app.addModifier('subsurf') },
+      ], 'Add modifier') }, '+ Add modifier');
+      this.panel.append(sec('Modifiers', mods, h('div', { class: 'row' }, addMod,
+        h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: app.vp.settings.showModifiersInEdit, onchange: (e: Event) => { app.vp.settings.showModifiersInEdit = (e.target as HTMLInputElement).checked; app.changed(); } }), 'Show in edit'))));
+      // material
+      const color = h('input', { type: 'color', value: a.material.color }) as HTMLInputElement;
+      color.addEventListener('input', () => { a.material.color = color.value; app.redraw(); });
+      color.addEventListener('change', () => { app.changed(); });
+      const rough = h('input', { type: 'range', min: '0', max: '1', step: '0.01', value: String(a.material.roughness) }) as HTMLInputElement;
+      rough.addEventListener('input', () => { a.material.roughness = +rough.value; app.redraw(); });
+      rough.addEventListener('change', () => app.changed());
+      const metal = h('input', { type: 'range', min: '0', max: '1', step: '0.01', value: String(a.material.metalness) }) as HTMLInputElement;
+      metal.addEventListener('input', () => { a.material.metalness = +metal.value; app.redraw(); });
+      metal.addEventListener('change', () => app.changed());
+      this.panel.append(sec('Material',
+        h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Colour'), color),
+        h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Rough'), rough),
+        h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Metal'), metal),
+        h('div', { class: 'row' },
+          h('button', { class: 'tiny', onclick: () => this.loadTexture() }, a.material.texture ? 'Replace texture' : 'Load texture'),
+          a.material.texture ? h('button', { class: 'tiny', onclick: () => this.setTexture(null) }, 'Remove') : null),
+        a.material.texture ? h('img', { class: 'texthumb', src: a.material.texture }) : null,
+      ));
+    }
+    this.panel.scrollTop = this.panelScroll;
+  }
+
+  private brushSection() {
+    const app = this.app, b = app.brush;
+    const row = (label: string, el: Node) => h('div', { class: 'row' }, h('span', { class: 'vlabel' }, label), el);
+    const range = (v: number, min: number, max: number, step: number, set: (x: number) => void) => {
+      const r = h('input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(v) }) as HTMLInputElement;
+      r.addEventListener('input', () => { set(+r.value); this.renderEditBar(); app.vp.requestRender(); });
+      return r;
+    };
+    const check = (label: string, v: boolean, set: (x: boolean) => void) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: v, onchange: (e: Event) => { set((e.target as HTMLInputElement).checked); this.renderRail(); } }), label);
+    return h('section', { class: 'psec' }, h('h3', {}, `Brush · ${BRUSHES.find((x) => x.type === b.type)!.label}`),
+      row('Radius', range(b.radius, 5, 300, 1, (x) => (b.radius = x))),
+      row('Strength', range(b.strength, 0.01, 1, 0.01, (x) => (b.strength = x))),
+      row('Falloff', h('div', { class: 'seg' }, (['smooth', 'sphere', 'sharp', 'linear'] as const).map((f) => h('button', { class: `segbtn${b.falloff === f ? ' on' : ''}`, onclick: () => { b.falloff = f; this.renderPanel(); } }, f)))),
+      check('Pen pressure → strength', b.pressureStrength, (x) => (b.pressureStrength = x)),
+      check('Pen pressure → radius', b.pressureRadius, (x) => (b.pressureRadius = x)),
+      check('X symmetry', b.symmetryX, (x) => (b.symmetryX = x)),
+      check('Invert (subtract)', b.invert, (x) => (b.invert = x)),
+    );
+  }
+
+  private async loadTexture() {
+    const f = await openFile('image/*');
+    if (!f) return;
+    this.setTexture(await readAsDataURL(f));
+  }
+
+  private setTexture(url: string | null) {
+    const a = this.app.active;
+    if (!a) return;
+    this.app.record(url ? 'Load texture' : 'Remove texture');
+    a.material.texture = url;
+    if (url) this.app.vp.settings.checker = false;
+    this.app.changed();
+    this.renderRail();
+  }
+
+  /* ================================================================ dialogs */
+  private settingsDialog() {
+    const app = this.app, s = app.settings, g = app.gestures.settings;
+    const seg = <T extends string>(opts: [T, string][], cur: T, set: (v: T) => void) => {
+      const box = h('div', { class: 'seg' });
+      const draw = (c: T) => { clear(box); box.append(...opts.map(([v, l]) => h('button', { class: `segbtn${c === v ? ' on' : ''}`, onclick: () => { set(v); draw(v); } }, l))); };
+      draw(cur);
+      return box;
+    };
+    const check = (label: string, v: boolean, set: (x: boolean) => void) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: v, onchange: (e: Event) => set((e.target as HTMLInputElement).checked) }), label);
+    const num = (label: string, v: number, set: (x: number) => void) => {
+      const i = h('input', { class: 'num', type: 'text', inputmode: 'decimal', value: String(v) }) as HTMLInputElement;
+      i.addEventListener('change', () => { const x = parseFloat(i.value); if (isFinite(x) && x > 0) set(x); });
+      return h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, label), i);
+    };
+    const body = h('div', { class: 'settings' },
+      h('h4', {}, 'Stylus & touch'),
+      h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, 'Palm rejection'), seg([['auto', 'Auto'], ['on', 'Pen only'], ['off', 'Off']], g.palmRejection, (v) => { g.palmRejection = v; s.palmRejection = v; if (v === 'off' || v === 'auto') app.gestures.resetPen(); this.renderStatus(); })),
+      h('p', { class: 'note' }, 'Auto: once an active pen is used, fingers only navigate (orbit / pan / zoom) and the pen does all editing. Pen barrel button drag orbits.'),
+      check('One-finger drag on empty space orbits', s.touchOrbit, (x) => (s.touchOrbit = x)),
+      check('Drag vertices / selected elements directly', s.tweak, (x) => (s.tweak = x)),
+      check('Left-handed layout (tools on the right)', s.leftHanded, (x) => { s.leftHanded = x; this.renderAll(); }),
+      h('h4', {}, 'Snapping increments'),
+      num('Move (units)', s.snap.move, (x) => (s.snap.move = x)),
+      num('Rotate (degrees)', s.snap.rotate, (x) => (s.snap.rotate = x)),
+      num('Scale (factor)', s.snap.scale, (x) => (s.snap.scale = x)),
+    );
+    dialog('Settings', body);
+  }
+
+  private helpDialog() {
+    const rows: [string, string][] = [
+      ['Touch: tap', 'Select (Set / + / − chips choose how)'],
+      ['Touch: double-tap', 'Object → enter Edit · Edge → loop · Vertex/face → linked'],
+      ['Touch: drag empty', 'Orbit'],
+      ['Touch: drag vertex', 'Move it (tweak)'],
+      ['Touch: hold, then drag', 'Box select'],
+      ['Two fingers', 'Pinch zoom + pan'],
+      ['Two-finger tap / three', 'Undo / redo'],
+      ['Pen: tap / drag', 'Select / box select or tweak'],
+      ['Pen: barrel button drag', 'Orbit'],
+      ['Pen: pressure', 'Sculpt strength (and radius, optional)'],
+      ['Pen hover', 'Pre-highlight, brush cursor, loop-cut preview'],
+      ['Transform buttons', 'Then drag anywhere; X/Y/Z chips constrain; ✓ confirms'],
+      ['Keys', 'Tab edit · G/R/S + X/Y/Z · E extrude · I inset · Ctrl+R loop cut · M merge · F fill · J connect · L linked · U unwrap · A all · X delete · Shift+D duplicate · Ctrl+Z undo'],
+      ['Mouse', 'Left select/box · Middle orbit · Shift+Middle / Right pan · Wheel zoom'],
+    ];
+    dialog('Gestures & shortcuts', h('table', { class: 'help' }, rows.map(([a, b]) => h('tr', {}, h('td', {}, a), h('td', {}, b)))));
+  }
+}
+
+function stamp() {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+}
