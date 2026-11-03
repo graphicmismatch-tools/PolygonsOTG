@@ -12,6 +12,19 @@ each with a smaller scope:
 | **Sculpt** | A small sculpt mode for shaping. It has 8 brushes: draw, clay, inflate, smooth, flatten, pinch, crease and grab. Pen pressure can control strength and/or radius. **Dynamic topology** splits long edges under the brush while you sculpt, so detail appears where you paint. You can set the detail size, and this works on any low-poly base. Also X symmetry, falloff curves, and a button that subdivides the whole mesh. |
 | **UV** | Split view: the 3D edit view next to a 2D UV editor. Seam-based **LSCM conformal unwrap**, smart UV project, and projection from view, cube, cylinder or sphere. Island packing. Move, rotate and scale UVs (with axis lock), flip, rotate 90°, weld, align and fit. Island selection, a checker preview, image textures, and UV layout PNG export. |
 
+**Remesh & decimate.** These are available as modifiers (with Apply) or as one-shot actions from the globe menu in the Object and Sculpt rails, and from Edit → Mesh tools. The modes follow Blender's Remesh and Decimate modifiers, using the published algorithms behind them:
+
+| | Method | Good for |
+|---|---|---|
+| Remesh · **Voxel** | Signed distance field on a grid, with inside/outside found by flood fill, then extracted with naive Surface Nets. Adds Taubin smoothing and can project back onto the original | Even all-quad mesh after sculpting. Closes holes and fuses overlapping parts |
+| Remesh · **Blocks** | The same field, emitted as cubes | Voxel-art look |
+| Remesh · **Isotropic** | Botsch & Kobbelt 2004: split > 4/3 L, collapse < 4/5 L, valence flips, tangential relaxation, projection | Uniform triangles that keep open borders. Can pair them into quads |
+| Decimate · **Collapse** | Garland & Heckbert quadric error metrics with a min-heap, boundary constraint planes, link-condition and flip checks | Reducing the face count by a ratio while keeping the shape |
+| Decimate · **Un-subdivide** | Labels each corner as original, edge or face-centre, then rebuilds the coarse faces | Undoing subdivision on quad grids |
+| Decimate · **Planar** | Merges faces within an angle limit into n-gons, then dissolves collinear vertices | Hard-surface and CAD-style cleanup |
+
+Remesh and decimate modifiers are hidden in Edit mode so editing stays instant. While you drag, they keep showing the last result, and they recompute when you let go.
+
 You can **import** OBJ, glTF/GLB and STL files. You can **export** OBJ (with UVs and normals), GLB (with materials and textures), STL, and PNG screenshots. Projects save as `.potg` files and autosave to the device.
 
 ## Input model
@@ -93,6 +106,7 @@ bundle and the APK as downloadable artifacts.
 
 ## Scope notes / limitations
 
+- Remeshing discards UVs and seams, so re-unwrap afterwards. The voxel grid is capped at about 3M points, and the size is raised automatically (with a note in the status bar) when a mesh is too big for the chosen size.
 - Dynamic topology only refines: it never merges or collapses edges. Use *Smooth* or lower the detail if an area gets too dense. Above 400k faces it pauses so the device stays responsive. Modifiers are hidden while you sculpt.
 - Meshes up to a few tens of thousands of faces stay responsive in edit mode on recent phones and tablets.
 - LSCM needs seams on closed shapes. A closed part without seams falls back to smart projection, and the status bar tells you when that happens.

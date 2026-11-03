@@ -96,6 +96,7 @@ const ICONS: Record<string, IconDef> = {
   proportional: { d: 'M12 2.5a9.5 9.5 0 100 19 9.5 9.5 0 000-19z', fill: 'M12 7a5 5 0 100 10 5 5 0 000-10z', solid: 'M10.4 12a1.6 1.6 0 103.2 0 1.6 1.6 0 10-3.2 0' },
   dyntopo: { d: 'M3 20L12 4l9 16zM7.5 12h9M12 20l-4.5-8M12 20l4.5-8' },
   detail: { d: 'M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16' },
+  remesh: { d: 'M12 3a9 9 0 100 18 9 9 0 000-18zM3.5 9h17M3.5 15h17M12 3c-3 3-3 15 0 18M12 3c3 3 3 15 0 18' },
   // view toggles
   xray: { d: 'M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12L4 7.5', bold: '', fill: 'M12 12v9l-8-4.5v-9z' },
   mirror: { d: 'M12 2v2M12 7v2M12 12v2M12 17v2M12 22v0', fill: 'M9 6L3 12l6 6zM15 6l6 6-6 6z' },

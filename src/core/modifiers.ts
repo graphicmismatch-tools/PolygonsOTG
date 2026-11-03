@@ -1,7 +1,12 @@
 import { Mesh, Face, ekey } from './mesh';
 import { V2, V3, avg2, avg3, lerp2 } from './vec';
+import { remesh, RemeshMode, defaultRemeshSize } from './remesh';
+import { decimate, DecimateMode } from './decimate';
 
-export type ModifierType = 'mirror' | 'subsurf';
+export type ModifierType = 'mirror' | 'subsurf' | 'remesh' | 'decimate';
+
+/** Modifiers too slow to re-run on every edit (deferred while dragging, hidden in edit mode). */
+export const HEAVY_MODIFIERS: ModifierType[] = ['remesh', 'decimate'];
 
 export interface Modifier {
   id: string;
@@ -11,13 +16,29 @@ export interface Modifier {
   axis?: 0 | 1 | 2;
   mergeDist?: number;
   levels?: number;
+  // remesh
+  remeshMode?: RemeshMode;
+  size?: number;
+  smooth?: number;
+  project?: boolean;
+  iterations?: number;
+  quads?: boolean;
+  // decimate
+  decimateMode?: DecimateMode;
+  ratio?: number;
+  angle?: number;
+  delimitSeams?: boolean;
+  keepBoundary?: boolean;
 }
 
-export function newModifier(type: ModifierType): Modifier {
+export function newModifier(type: ModifierType, mesh?: Mesh): Modifier {
   const id = Math.random().toString(36).slice(2, 9);
-  return type === 'mirror'
-    ? { id, type, enabled: true, axis: 0, mergeDist: 0.001 }
-    : { id, type, enabled: true, levels: 1 };
+  switch (type) {
+    case 'mirror': return { id, type, enabled: true, axis: 0, mergeDist: 0.001 };
+    case 'subsurf': return { id, type, enabled: true, levels: 1 };
+    case 'remesh': return { id, type, enabled: true, remeshMode: 'voxel', size: mesh ? defaultRemeshSize(mesh, 1 / 40) : 0.05, smooth: 1, project: true, iterations: 4, quads: false };
+    case 'decimate': return { id, type, enabled: true, decimateMode: 'collapse', ratio: 0.5, quads: true, keepBoundary: true, iterations: 1, angle: 5, delimitSeams: false };
+  }
 }
 
 /** Evaluate the modifier stack and return a new mesh (no selection data). */
@@ -29,6 +50,8 @@ export function evaluate(base: Mesh, mods: Modifier[]): Mesh {
     if (!copied) { m = stripSelection(base); copied = true; }
     if (mod.type === 'mirror') m = mirror(m, mod.axis ?? 0, mod.mergeDist ?? 0.001);
     else if (mod.type === 'subsurf') for (let i = 0; i < Math.min(4, mod.levels ?? 1); i++) m = catmullClark(m);
+    else if (mod.type === 'remesh') m = remesh(m, { mode: mod.remeshMode ?? 'voxel', size: mod.size ?? 0.05, smooth: mod.smooth, project: mod.project, iterations: mod.iterations, quads: mod.quads });
+    else if (mod.type === 'decimate') m = decimate(m, { mode: mod.decimateMode ?? 'collapse', ratio: mod.ratio, quads: mod.quads, keepBoundary: mod.keepBoundary, iterations: mod.iterations, angle: mod.angle, delimitSeams: mod.delimitSeams });
   }
   return m;
 }

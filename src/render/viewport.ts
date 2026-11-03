@@ -4,7 +4,7 @@ import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeome
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { Scene, SceneObject } from '../core/scene';
 import { Mesh, parseKey } from '../core/mesh';
-import { evaluate } from '../core/modifiers';
+import { evaluate, HEAVY_MODIFIERS } from '../core/modifiers';
 import { buildGeometry, refreshGeometry, BuiltGeometry } from './geometry';
 import { V3 } from '../core/vec';
 
@@ -156,6 +156,8 @@ export class Viewport {
   private textureCache = new Map<string, THREE.Texture>();
   onAfterRender: () => void = () => {};
   mode: AppMode = 'object';
+  /** Set while a transform / stroke is running: heavy modifiers aren't re-evaluated. */
+  deferHeavy = false;
   settings: ViewSettings = { xray: false, wireframe: false, showModifiersInEdit: true, checker: false, showGrid: true };
 
   constructor(public canvas: HTMLCanvasElement) {
@@ -261,7 +263,8 @@ export class Viewport {
     const isActive = scene.activeId === o.id;
     const editing = isActive && (mode === 'edit' || mode === 'uv' || mode === 'sculpt');
     const useMods = !(editing && (mode === 'sculpt' || !this.settings.showModifiersInEdit));
-    const mods = useMods ? o.modifiers.filter((m) => m.enabled) : [];
+    const mods = useMods ? o.modifiers.filter((m) => m.enabled && !(editing && HEAVY_MODIFIERS.includes(m.type))) : [];
+    const heavy = mods.some((m) => HEAVY_MODIFIERS.includes(m.type));
     const modsKey = JSON.stringify(mods);
     const key = `${modsKey}|${o.smooth}`;
     // display geometry
@@ -274,7 +277,9 @@ export class Viewport {
       v.display.geometry = v.built.geometry;
     } else {
       const fullKey = `${key}|v${o.mesh.version}`;
-      if (v.displayKey !== fullKey) {
+      // heavy modifiers: while dragging/sculpting keep showing the last result
+      const stale = heavy && this.deferHeavy && v.built && v.displayKey.startsWith(`${key}|v`);
+      if (v.displayKey !== fullKey && !stale) {
         if (v.built && v.built !== v.cage) v.built.geometry.dispose();
         v.evalMesh = evaluate(o.mesh, mods);
         v.built = buildGeometry(v.evalMesh, o.smooth);

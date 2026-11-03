@@ -12,6 +12,8 @@ import { Gizmo, GizmoKind, GizmoHandle, segDist } from './render/overlay';
 import { Gestures, PInfo, ToolHandler } from './input';
 import { TransformSession, TKind, Axis, vertTarget, objTarget, Snap, Falloff, buildProp, setPropRadius } from './modes/transform';
 import { bevel as bevelOp } from './core/bevel';
+import { remesh, RemeshMode, RemeshInfo, defaultRemeshSize } from './core/remesh';
+import { decimate, DecimateMode, unsubdivide } from './core/decimate';
 import { SculptStroke, BrushSettings, defaultBrush } from './modes/sculpt';
 import { kvGet, kvSet } from './io/files';
 
@@ -34,7 +36,7 @@ export interface ParamDef { name: string; value: number; min: number; max: numbe
 
 export type Modal =
   | { kind: 'transform'; session: TransformSession; flavor: 'button' | 'drag' | 'key'; label: string; onCancel?: () => void; onConfirm?: () => void }
-  | { kind: 'param'; label: string; params: ParamDef[]; run: (v: number[]) => void; onCancel: () => void };
+  | { kind: 'param'; label: string; params: ParamDef[]; run: (v: number[]) => void; onCancel: () => void; heavy?: boolean; flush?: () => void };
 
 type Listener = () => void;
 
@@ -103,7 +105,11 @@ export class App {
   emit(evt: string) { this.listeners.get(evt)?.forEach((f) => f()); if (evt !== 'any') this.listeners.get('any')?.forEach((f) => f()); }
 
   /** Re-sync 3D + overlays after any change. */
+  /** True while a sculpt stroke is in progress. */
+  stroking = false;
+
   redraw() {
+    this.vp.deferHeavy = !!this.modal || this.stroking;
     this.vp.sync(this.scene, this.mode);
     this.uvRedraw();
   }
@@ -392,9 +398,8 @@ export class App {
     this.activeHandle = null;
     if (m.kind === 'transform') {
       m.session.endDrag();
-      if (this.mode === 'object') this.scene.selected.forEach(() => {});
       m.onConfirm?.();
-    }
+    } else m.flush?.();
     this.emit('modal');
     this.changed();
   }
@@ -412,25 +417,38 @@ export class App {
     this.changed();
   }
 
-  /** Start a parametric op: values are re-applied on a fresh copy of the pre-op mesh. */
-  startParamOp(label: string, params: ParamDef[], op: (m: Mesh, v: number[]) => void) {
-    const a = this.editObj;
+  /**
+   * Start a parametric op: values are re-applied on a fresh copy of the pre-op mesh.
+   * `op` may return a new mesh (whole-mesh rebuilds like remesh) or mutate in place.
+   * Heavy ops run deferred (so a busy message can paint) and only when a drag ends.
+   */
+  startParamOp(label: string, params: ParamDef[], op: (m: Mesh, v: number[]) => Mesh | void, opts: { heavy?: boolean; report?: (m: Mesh) => string } = {}) {
+    const a = this.isEditLike ? this.editObj : this.active;
     if (!a) return;
     this.confirmModal();
     this.record(label);
     const before = a.mesh.clone();
-    const run = (v: number[]) => {
+    let pending = 0;
+    const doRun = (v: number[]) => {
       const m = before.clone();
-      op(m, v);
-      a.mesh = m;
-      m.changed();
+      const res = op(m, v) ?? m;
+      a.mesh = res;
+      res.changed();
       this.redraw();
       this.emit('modal');
+      if (opts.report) this.status(opts.report(res), 4000);
+    };
+    const run = (v: number[]) => {
+      if (!opts.heavy) return doRun(v);
+      clearTimeout(pending);
+      this.status(`${label}…`, 0);
+      pending = window.setTimeout(() => { pending = 0; doRun(v); }, 30);
     };
     run(params.map((p) => p.value));
     this.modal = {
-      kind: 'param', label, params, run,
-      onCancel: () => { a.mesh = before; this.history.cancelLast(); },
+      kind: 'param', label, params, run, heavy: opts.heavy,
+      flush: () => { if (pending) { clearTimeout(pending); pending = 0; doRun(params.map((p) => p.value)); } },
+      onCancel: () => { clearTimeout(pending); pending = 0; a.mesh = before; this.history.cancelLast(); },
     };
     this.emit('modal');
   }
@@ -469,9 +487,15 @@ export class App {
       const p0 = pm.params[0];
       const start = p0.value;
       let moved = false;
+      const setLive = (v: number) => {
+        if (!pm.heavy) return this.setParam(0, v);
+        // heavy ops: show the value while dragging, compute on release
+        p0.value = Math.min(p0.max, Math.max(p0.min, p0.int ? Math.round(v) : v));
+        this.emit('modal');
+      };
       return {
-        move: (mx) => { moved = true; this.setParam(0, start + (mx - x) * p0.drag); },
-        end: () => { if (!moved) this.confirmModal(); },
+        move: (mx) => { moved = true; setLive(start + (mx - x) * p0.drag); },
+        end: () => { if (!moved) this.confirmModal(); else if (pm.heavy) pm.run(pm.params.map((q) => q.value)); },
         cancel: () => this.setParam(0, start),
       };
     }
@@ -564,19 +588,21 @@ export class App {
     const a = this.active;
     if (!a) return null;
     this.record(`Sculpt ${this.brush.type}`);
+    this.stroking = true;
     const stroke = new SculptStroke(a, this.vp, this.brush,
       () => { this.redraw(); },
       (changed) => {
+        this.stroking = false;
         if (!changed) this.history.cancelLast();
         else if (stroke.limitHit) this.status('Dynamic topology paused: face limit reached');
         else if (stroke.added) this.status(`+${stroke.added} faces · ${a.mesh.faces.length} total`);
         this.changed();
       },
-      () => { this.revertLast(); },
+      () => { this.stroking = false; this.revertLast(); },
       () => this.keyInvert,
     );
     const hit = stroke.begin(x, y, p);
-    if (!hit && p.type === 'touch') { this.history.cancelLast(); return null; }
+    if (!hit && p.type === 'touch') { this.stroking = false; this.history.cancelLast(); return null; }
     this.redraw();
     const self = this;
     return {
@@ -1085,7 +1111,7 @@ export class App {
     const a = this.active;
     if (!a) return;
     this.record(`Add ${type}`);
-    a.modifiers.push(newModifier(type));
+    a.modifiers.push(newModifier(type, a.mesh));
     this.changed();
   }
 
@@ -1101,6 +1127,43 @@ export class App {
     a.mesh.changed();
     a.modifiers = a.modifiers.slice(idx + 1);
     this.changed();
+  }
+
+  /** One-shot remesh of the active object's mesh (edit, sculpt or object mode). */
+  remeshOp(mode: RemeshMode) {
+    const a = this.active;
+    if (!a || !a.mesh.faces.length) { this.status('Remesh needs a mesh with faces'); return; }
+    const isVoxel = mode !== 'isotropic';
+    const size = defaultRemeshSize(a.mesh, mode === 'blocks' ? 1 / 16 : mode === 'isotropic' ? 1 / 30 : 1 / 48);
+    const step = Math.max(0.0005, Math.round(size * 0.2 * 1e4) / 1e4);
+    const params: ParamDef[] = [{ name: isVoxel ? 'Voxel size' : 'Edge length', value: size, min: size / 20, max: size * 20, step, drag: step * 0.05, }];
+    if (mode === 'voxel') params.push({ name: 'Smooth', value: 1, min: 0, max: 8, step: 1, drag: 0.03, int: true }, { name: 'Project', value: 1, min: 0, max: 1, step: 1, drag: 0.02, int: true });
+    if (mode === 'isotropic') params.push({ name: 'Iterations', value: 4, min: 1, max: 12, step: 1, drag: 0.03, int: true }, { name: 'Quads', value: 0, min: 0, max: 1, step: 1, drag: 0.02, int: true });
+    const info: RemeshInfo = { size: 0, clamped: false };
+    const label = mode === 'voxel' ? 'Voxel Remesh' : mode === 'blocks' ? 'Blocks Remesh' : 'Isotropic Remesh';
+    this.startParamOp(label, params, (m, v) => remesh(m, { mode, size: v[0], smooth: v[1], project: v[2] === 1, iterations: v[1], quads: v[2] === 1 }, info),
+      { heavy: true, report: (m) => `${label}: ${m.faces.length} faces${info.clamped ? ` (voxel size raised to ${info.size.toFixed(4)} — grid limit)` : ''}` });
+  }
+
+  /** One-shot decimate of the active object's mesh. */
+  decimateOp(mode: DecimateMode) {
+    const a = this.active;
+    if (!a || !a.mesh.faces.length) { this.status('Decimate needs a mesh with faces'); return; }
+    const before = a.mesh.faces.length;
+    let params: ParamDef[];
+    if (mode === 'collapse') params = [{ name: 'Ratio', value: 0.5, min: 0.01, max: 1, step: 0.05, drag: 0.002 }, { name: 'Quads', value: 1, min: 0, max: 1, step: 1, drag: 0.02, int: true }];
+    else if (mode === 'unsubdivide') params = [{ name: 'Levels', value: 1, min: 1, max: 6, step: 1, drag: 0.03, int: true }];
+    else params = [{ name: 'Angle°', value: 5, min: 0.1, max: 60, step: 1, drag: 0.1 }, { name: 'Seams', value: 0, min: 0, max: 1, step: 1, drag: 0.02, int: true }];
+    const label = mode === 'collapse' ? 'Decimate' : mode === 'unsubdivide' ? 'Un-subdivide' : 'Planar Decimate';
+    this.startParamOp(label, params, (m, v) => {
+      if (mode === 'unsubdivide') {
+        let r = m; let n = 0;
+        for (let i = 0; i < v[0]; i++) { const u = unsubdivide(r); if (!u) break; r = u; n++; }
+        if (!n) this.status('Un-subdivide needs an all-quad mesh made by subdividing', 4000);
+        return r;
+      }
+      return decimate(m, mode === 'collapse' ? { mode, ratio: v[0], quads: v[1] === 1 } : { mode, angle: v[0], delimitSeams: v[1] === 1 });
+    }, { heavy: true, report: (m) => `${label}: ${before} → ${m.faces.length} faces` });
   }
 
   /** Convert the evaluated object to a mesh copy and edit the subdivided result (sculpt prep). */

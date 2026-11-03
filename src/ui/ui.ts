@@ -10,6 +10,7 @@ import { exportOBJ, exportSTL, exportGLB, importOBJ, importGLTF, importSTL, seri
 import { saveFile, openFile, readAsDataURL, isAndroidApp } from '../io/files';
 import { Axis } from '../modes/transform';
 import { V3 } from '../core/vec';
+import { Modifier } from '../core/modifiers';
 
 const MODES: { id: AppMode; label: string; icon: string }[] = [
   { id: 'object', label: 'Object', icon: 'modeObject' },
@@ -17,6 +18,8 @@ const MODES: { id: AppMode; label: string; icon: string }[] = [
   { id: 'sculpt', label: 'Sculpt', icon: 'modeSculpt' },
   { id: 'uv', label: 'UV editing', icon: 'modeUV' },
 ];
+
+const MOD_NAMES: Record<string, string> = { mirror: 'Mirror', subsurf: 'Subdivision', remesh: 'Remesh', decimate: 'Decimate' };
 
 const BRUSH_ICONS: Record<string, string> = {
   draw: 'brushDraw', clay: 'brushClay', inflate: 'brushInflate', smooth: 'brushSmooth',
@@ -234,6 +237,19 @@ export class UI {
     return b;
   }
 
+  private remeshItems(): MenuItem[] {
+    const app = this.app;
+    return [
+      { label: 'Voxel remesh', hint: 'even quads, closes holes', action: () => app.remeshOp('voxel') },
+      { label: 'Isotropic remesh', hint: 'even triangles', action: () => app.remeshOp('isotropic') },
+      { label: 'Blocks remesh', hint: 'voxel-art cubes', action: () => app.remeshOp('blocks') },
+      { separator: true, label: '' },
+      { label: 'Decimate: collapse', hint: 'reduce by ratio', action: () => app.decimateOp('collapse') },
+      { label: 'Decimate: un-subdivide', hint: 'quad grids', action: () => app.decimateOp('unsubdivide') },
+      { label: 'Decimate: planar', hint: 'merge flat areas', action: () => app.decimateOp('planar') },
+    ];
+  }
+
   renderRail() {
     const app = this.app;
     clear(this.rail);
@@ -256,6 +272,7 @@ export class UI {
             { label: 'Rotation & scale', action: () => app.applyTransform('rotscale') },
             { label: 'Location', action: () => app.applyTransform('location') },
           ]),
+          this.menuBtn('remesh', 'Remesh / decimate', () => this.remeshItems()),
           this.menuBtn('origin', 'Set origin', () => [
             { label: 'To geometry centre', action: () => app.setOrigin('geometry') },
             { label: 'To geometry bottom', action: () => app.setOrigin('bottom') },
@@ -311,6 +328,7 @@ export class UI {
             { label: 'Flip normals', action: () => app.flipNormals() },
             { label: 'Recalculate normals', action: () => app.recalcNormals() },
             { label: 'Snap to X = 0', action: () => app.snapCenterX() },
+            { label: 'Remesh / decimate', submenu: () => this.remeshItems() },
             { separator: true, label: '' },
             { label: 'Add primitive', submenu: () => PRIMITIVES.map((p) => ({ label: p.label, action: () => app.addPrimitive(p.type) })) },
           ]),
@@ -333,6 +351,7 @@ export class UI {
         this.group(
           this.btn('dyntopo', b.dyntopo ? 'Dynamic topology: on (adds detail)' : 'Dynamic topology: off', () => { b.dyntopo = !b.dyntopo; this.renderRail(); this.renderEditBar(); this.renderPanel(); }, { active: b.dyntopo }),
           this.btn('subdivide', 'Subdivide whole mesh', () => app.subdivideForSculpt(1)),
+          this.menuBtn('remesh', 'Remesh / decimate', () => this.remeshItems()),
           this.btn('shading', app.active?.smooth ? 'Shade flat' : 'Shade smooth', () => { app.setShading(!app.active?.smooth); this.renderRail(); }, { active: !!app.active?.smooth }),
         ),
       );
@@ -485,7 +504,7 @@ export class UI {
         bar.append(h('div', { class: 'param' },
           h('span', { class: 'pname' }, p.name),
           h('button', { class: 'mbtn small', tip: `Decrease ${p.name.toLowerCase()}`, onclick: () => app.setParam(i, p.value - p.step) }, icon('minus', 16)),
-          h('span', { class: 'pval' }, p.int ? String(p.value) : fmt(p.value, 3)),
+          h('span', { class: 'pval' }, p.int && p.min === 0 && p.max === 1 ? (p.value ? 'on' : 'off') : p.int ? String(p.value) : fmt(p.value, 3)),
           h('button', { class: 'mbtn small', tip: `Increase ${p.name.toLowerCase()}`, onclick: () => app.setParam(i, p.value + p.step) }, icon('plus', 16)),
         ));
       });
@@ -613,7 +632,7 @@ export class UI {
       // modifiers
       const mods = h('div', {}, a.modifiers.map((md) => {
         const head = h('div', { class: 'modhead' },
-          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: md.enabled, onchange: (e: Event) => { app.record('Toggle modifier'); md.enabled = (e.target as HTMLInputElement).checked; app.changed(); } }), md.type === 'mirror' ? 'Mirror' : 'Subdivision'),
+          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: md.enabled, onchange: (e: Event) => { app.record('Toggle modifier'); md.enabled = (e.target as HTMLInputElement).checked; app.changed(); } }), MOD_NAMES[md.type]),
           h('div', { class: 'spacer' }),
           h('button', { class: 'tiny', onclick: () => app.applyModifiers(md.id) }, 'Apply'),
           h('button', { class: 'iconbtn small', tip: 'Remove modifier', onclick: () => { app.record('Remove modifier'); a.modifiers = a.modifiers.filter((x) => x !== md); app.changed(); } }, icon('trash', 16)),
@@ -621,16 +640,22 @@ export class UI {
         let body: Node;
         if (md.type === 'mirror') {
           body = h('div', { class: 'row seg' }, ['X', 'Y', 'Z'].map((l, i) => h('button', { class: `segbtn${md.axis === i ? ' on' : ''}`, onclick: () => { app.record('Mirror axis'); md.axis = i as 0 | 1 | 2; app.changed(); } }, l)));
-        } else {
+        } else if (md.type === 'subsurf') {
           body = h('div', { class: 'row seg' }, h('span', { class: 'vlabel' }, 'Levels'), [1, 2, 3].map((l) => h('button', { class: `segbtn${md.levels === l ? ' on' : ''}`, onclick: () => { app.record('Subdiv levels'); md.levels = l; app.changed(); } }, String(l))));
-        }
+        } else body = this.heavyModifierBody(md);
         return h('div', { class: 'mod' }, head, body);
       }));
       const addMod: HTMLButtonElement = h('button', { class: 'tiny', onclick: () => showMenu(addMod, [
         { label: 'Mirror', action: () => app.addModifier('mirror') },
         { label: 'Subdivision surface', action: () => app.addModifier('subsurf') },
+        { label: 'Remesh', hint: 'voxel / blocks / isotropic', action: () => app.addModifier('remesh') },
+        { label: 'Decimate', hint: 'collapse / un-subdiv / planar', action: () => app.addModifier('decimate') },
       ], 'Add modifier') }, '+ Add modifier');
-      this.panel.append(sec('Modifiers', mods, h('div', { class: 'row' }, addMod,
+      const evalFaces = app.vp.view(a.id)?.evalMesh?.faces.length;
+      const resultRow = a.modifiers.some((m) => m.enabled) && evalFaces !== undefined
+        ? h('div', { class: 'note' }, `result: ${evalFaces} faces (base ${a.mesh.faces.length})${a.modifiers.some((m) => m.enabled && (m.type === 'remesh' || m.type === 'decimate')) ? ' · remesh/decimate are hidden in edit mode' : ''}`)
+        : null;
+      this.panel.append(sec('Modifiers', mods, resultRow, h('div', { class: 'row' }, addMod,
         h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: app.vp.settings.showModifiersInEdit, onchange: (e: Event) => { app.vp.settings.showModifiersInEdit = (e.target as HTMLInputElement).checked; app.changed(); } }), 'Show in edit'))));
       // material
       const color = h('input', { type: 'color', value: a.material.color }) as HTMLInputElement;
@@ -653,6 +678,55 @@ export class UI {
       ));
     }
     this.panel.scrollTop = this.panelScroll;
+  }
+
+  /** Settings UI for the remesh / decimate modifiers. Changes recompute after a frame so a busy hint shows. */
+  private heavyModifierBody(md: Modifier): Node {
+    const app = this.app;
+    const commit = (label: string, f: () => void) => {
+      app.record(label);
+      f();
+      app.status('Updating modifiers…', 0);
+      this.renderPanel();
+      setTimeout(() => { app.changed(); app.status('', 1); this.renderPanel(); }, 30);
+    };
+    const seg = <T extends string | number>(label: string, opts: [T, string][], cur: T | undefined, set: (v: T) => void) =>
+      h('div', { class: 'row seg' }, h('span', { class: 'vlabel' }, label), opts.map(([v, l]) => h('button', { class: `segbtn${cur === v ? ' on' : ''}`, onclick: () => commit(label, () => set(v)) }, l)));
+    const check = (label: string, v: boolean | undefined, set: (x: boolean) => void) =>
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!v, onchange: (e: Event) => commit(label, () => set((e.target as HTMLInputElement).checked)) }), label);
+    const num = (label: string, v: number, set: (x: number) => void, factor = 1.25) => {
+      const inp = h('input', { class: 'num', type: 'text', inputmode: 'decimal', value: fmt(v, 4) }) as HTMLInputElement;
+      inp.addEventListener('change', () => { const x = parseFloat(inp.value); if (isFinite(x) && x > 0) commit(label, () => set(x)); });
+      return h('div', { class: 'row' }, h('span', { class: 'vlabel' }, label),
+        h('button', { class: 'mbtn small', tip: `Smaller ${label.toLowerCase()}`, onclick: () => commit(label, () => set(v / factor)) }, icon('minus', 14)),
+        inp,
+        h('button', { class: 'mbtn small', tip: `Larger ${label.toLowerCase()}`, onclick: () => commit(label, () => set(v * factor)) }, icon('plus', 14)));
+    };
+    if (md.type === 'remesh') {
+      const mode = md.remeshMode ?? 'voxel';
+      return h('div', {},
+        seg('Mode', [['voxel', 'Voxel'], ['blocks', 'Blocks'], ['isotropic', 'Isotropic']], mode, (v) => (md.remeshMode = v)),
+        num(mode === 'isotropic' ? 'Edge len' : 'Voxel', md.size ?? 0.05, (x) => (md.size = x)),
+        mode === 'voxel' ? seg('Smooth', [[0, '0'], [1, '1'], [2, '2'], [4, '4']], md.smooth ?? 1, (v) => (md.smooth = v)) : null,
+        mode === 'voxel' ? check('Project onto original', md.project, (x) => (md.project = x)) : null,
+        mode === 'isotropic' ? seg('Iterations', [[2, '2'], [4, '4'], [8, '8']], md.iterations ?? 4, (v) => (md.iterations = v)) : null,
+        mode === 'isotropic' ? check('Quads where possible', md.quads, (x) => (md.quads = x)) : null,
+      );
+    }
+    const mode = md.decimateMode ?? 'collapse';
+    const ratio = h('input', { type: 'range', min: '0.01', max: '1', step: '0.01', value: String(md.ratio ?? 0.5) }) as HTMLInputElement;
+    const ratioVal = h('span', { class: 'slider-val' }, fmt(md.ratio ?? 0.5, 2));
+    ratio.addEventListener('input', () => { ratioVal.textContent = fmt(+ratio.value, 2); });
+    ratio.addEventListener('change', () => commit('Decimate ratio', () => (md.ratio = +ratio.value)));
+    return h('div', {},
+      seg('Mode', [['collapse', 'Collapse'], ['unsubdivide', 'Un-subdiv'], ['planar', 'Planar']], mode, (v) => (md.decimateMode = v)),
+      mode === 'collapse' ? h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Ratio'), ratio, ratioVal) : null,
+      mode === 'collapse' ? check('Quads where possible', md.quads, (x) => (md.quads = x)) : null,
+      mode === 'collapse' ? check('Keep open borders', md.keepBoundary !== false, (x) => (md.keepBoundary = x)) : null,
+      mode === 'unsubdivide' ? seg('Levels', [[1, '1'], [2, '2'], [3, '3']], md.iterations ?? 1, (v) => (md.iterations = v)) : null,
+      mode === 'planar' ? num('Angle°', md.angle ?? 5, (x) => (md.angle = Math.min(90, x)), 1.5) : null,
+      mode === 'planar' ? check('Stop at seams', md.delimitSeams, (x) => (md.delimitSeams = x)) : null,
+    );
   }
 
   private brushSection() {
@@ -761,6 +835,7 @@ export class UI {
       ['Transform buttons', 'Then drag anywhere; X/Y/Z chips constrain; ✓ confirms'],
       ['Proportional', 'Chip or O toggles; while moving use −/+ in the bar, the mouse wheel or [ ]'],
       ['Knife', 'Drag a straight line across faces; repeat for more cuts'],
+      ['Remesh / decimate', 'Modifiers in the panel, or one-shot from the globe menu (Object & Sculpt rail, Edit → Mesh tools)'],
       ['Keys', 'Tab edit · G/R/S + X/Y/Z · E extrude · I inset · Ctrl+B bevel · K knife · O proportional · Ctrl+R loop cut · M merge · F fill · J connect · L linked · U unwrap · A all · X delete · Shift+D duplicate · Ctrl+Z undo'],
       ['Mouse', 'Left select/box · Middle orbit · Shift+Middle / Right pan · Wheel zoom'],
     ];
