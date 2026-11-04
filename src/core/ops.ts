@@ -70,7 +70,7 @@ export function extrudeFaces(m: Mesh): ExtrudeResult {
     }
   }
   const map = new Map<number, number>();
-  for (const fi of region) for (const v of m.faces[fi].v) if (!map.has(v)) map.set(v, m.addVert(m.verts[v]));
+  for (const fi of region) for (const v of m.faces[fi].v) if (!map.has(v)) map.set(v, m.addVert(m.verts[v], v));
 
   const sideFaces: number[] = [];
   for (const [a, b, f] of boundary) {
@@ -93,7 +93,7 @@ export function extrudeFaces(m: Mesh): ExtrudeResult {
 export function extrudeEdges(m: Mesh): ExtrudeResult {
   const edges = [...m.selE].map(parseKey);
   const map = new Map<number, number>();
-  const dup = (v: number) => { let n = map.get(v); if (n === undefined) { n = m.addVert(m.verts[v]); map.set(v, n); } return n; };
+  const dup = (v: number) => { let n = map.get(v); if (n === undefined) { n = m.addVert(m.verts[v], v); map.set(v, n); } return n; };
   const newSelE = new Set<string>();
   let nrm: V3 = [0, 0, 0];
   for (const [a0, b0] of edges) {
@@ -157,7 +157,7 @@ export function insetFaces(m: Mesh): InsetHandle | null {
     const f = m.faces[fi];
     const center = m.faceCenter(fi);
     const normal = m.faceNormal(fi);
-    const inner = f.v.map((v) => { const nv = m.addVert(m.verts[v]); records.push({ nv, from: [...m.verts[v]] as V3, center, normal }); return nv; });
+    const inner = f.v.map((v) => { const nv = m.addVert(m.verts[v], v); records.push({ nv, from: [...m.verts[v]] as V3, center, normal }); return nv; });
     const n = f.v.length;
     const cuv = avg2(f.uv);
     const innerUV = f.uv.map((u) => lerp2(u, cuv, 0.2));
@@ -195,7 +195,7 @@ export function subdivideFaces(m: Mesh, smooth = false) {
   const midOf = (a: number, b: number) => {
     const k = ekey(a, b);
     let v = mid.get(k);
-    if (v === undefined) { v = m.addVert(lerp(m.verts[a], m.verts[b], 0.5)); mid.set(k, v); }
+    if (v === undefined) { v = m.addVert(lerp(m.verts[a], m.verts[b], 0.5), [[a, 0.5], [b, 0.5]]); mid.set(k, v); }
     return v;
   };
   const newFaces: Face[] = [];
@@ -203,7 +203,7 @@ export function subdivideFaces(m: Mesh, smooth = false) {
   for (const fi of sel) {
     const f = m.faces[fi];
     const n = f.v.length;
-    const c = m.addVert(m.faceCenter(fi));
+    const c = m.addVert(m.faceCenter(fi), m.faces[fi].v.map((x) => [x, 1 / m.faces[fi].v.length] as [number, number]));
     const cuv = avg2(f.uv);
     for (let i = 0; i < n; i++) {
       const prev = (i + n - 1) % n, next = (i + 1) % n;
@@ -280,7 +280,7 @@ export function loopCut(m: Mesh, startKey: string, cuts = 1): LoopCutHandle | nu
   const newV = new Map<string, { a: number; b: number; vs: number[] }>();
   for (const [a, b] of ring.edges) {
     const vs: number[] = [];
-    for (let c = 1; c <= cuts; c++) vs.push(m.addVert(lerp(m.verts[a], m.verts[b], c / (cuts + 1))));
+    for (let c = 1; c <= cuts; c++) vs.push(m.addVert(lerp(m.verts[a], m.verts[b], c / (cuts + 1)), [[a, 1 - c / (cuts + 1)], [b, c / (cuts + 1)]]));
     newV.set(ekey(a, b), { a, b, vs });
   }
   const vAt = (a: number, b: number, c: number) => {
@@ -637,7 +637,7 @@ export function triangulateFace(verts: V3[], loop: number[]): [number, number, n
 /** Duplicate selected geometry (faces + loose selected edges). New geometry becomes selected. */
 export function duplicateSelection(m: Mesh): number[] {
   const map = new Map<number, number>();
-  const dup = (v: number) => { let n = map.get(v); if (n === undefined) { n = m.addVert(m.verts[v]); map.set(v, n); } return n; };
+  const dup = (v: number) => { let n = map.get(v); if (n === undefined) { n = m.addVert(m.verts[v], v); map.set(v, n); } return n; };
   const newF: number[] = [];
   for (const fi of [...m.selF]) { const f = m.faces[fi]; newF.push(m.addFace(f.v.map(dup), f.uv)); }
   for (const k of m.selE) {
@@ -663,7 +663,7 @@ export function splitSelection(m: Mesh) {
   const map = new Map<number, number>();
   for (const fi of sel) {
     const f = m.faces[fi];
-    f.v = f.v.map((v) => { if (!shared.has(v)) return v; let n = map.get(v); if (n === undefined) { n = m.addVert(m.verts[v]); map.set(v, n); } return n; });
+    f.v = f.v.map((v) => { if (!shared.has(v)) return v; let n = map.get(v); if (n === undefined) { n = m.addVert(m.verts[v], v); map.set(v, n); } return n; });
   }
   m.changed();
   m.flush('face');
@@ -830,7 +830,7 @@ export function subdivideEdges(m: Mesh, cuts = 1) {
     const chain = [a];
     for (let c = 1; c <= cuts; c++) {
       const t = c / (cuts + 1);
-      const nv = m.addVert(lerp(m.verts[a], m.verts[b], t));
+      const nv = m.addVert(lerp(m.verts[a], m.verts[b], t), [[a, 1 - t], [b, t]]);
       // insert between prev and b; relative t on the remaining segment
       splitEdgeInFaces(m, prev, b, nv, 1 / (cuts + 2 - c));
       chain.push(nv);
@@ -954,7 +954,7 @@ export function knifeCut(m: Mesh, hits: KnifeHit[]): number {
         const prev = done.get(k);
         if (prev !== undefined) v = prev;
         else {
-          v = m.addVert(lerp(m.verts[a], m.verts[b], t));
+          v = m.addVert(lerp(m.verts[a], m.verts[b], t), [[a, 1 - t], [b, t]]);
           splitEdgeInFaces(m, a, b, v, t);
           if (m.seams.has(ekey(a, b))) { m.seams.delete(ekey(a, b)); m.seams.add(ekey(a, v)); m.seams.add(ekey(v, b)); }
           done.set(k, v);

@@ -1,5 +1,8 @@
 import * as THREE from 'three';
-import { Scene, SceneObject } from './core/scene';
+import { Scene, SceneObject, evalContext, meshToArmature } from './core/scene';
+import * as rig from './core/armature';
+import { autoWeights, mirrorWeightsX, topInfluences } from './core/skin';
+import { WeightStroke, WeightBrush, defaultWeightBrush } from './modes/weightPaint';
 import { History } from './core/history';
 import { Mesh, SelectMode, ekey, parseKey } from './core/mesh';
 import * as ops from './core/ops';
@@ -10,7 +13,7 @@ import { V3 } from './core/vec';
 import { Viewport, AppMode, v3 } from './render/viewport';
 import { Gizmo, GizmoKind, GizmoHandle, segDist } from './render/overlay';
 import { Gestures, PInfo, ToolHandler } from './input';
-import { TransformSession, TKind, Axis, vertTarget, objTarget, Snap, Falloff, buildProp, setPropRadius } from './modes/transform';
+import { TransformSession, TKind, Axis, vertTarget, objTarget, boneTarget, Snap, Falloff, buildProp, setPropRadius } from './modes/transform';
 import { bevel as bevelOp } from './core/bevel';
 import { remesh, RemeshMode, RemeshInfo, defaultRemeshSize } from './core/remesh';
 import { decimate, DecimateMode, unsubdivide } from './core/decimate';
@@ -52,6 +55,9 @@ export class App {
   selOp: SelOp = 'set';
   tool: EditTool = 'select';
   brush: BrushSettings = defaultBrush();
+  wbrush: WeightBrush = defaultWeightBrush();
+  /** Vertex group (bone name) painted in weight mode. */
+  weightGroup: string | null = null;
   modal: Modal | null = null;
   settings: Settings = {
     mirrorX: false,
@@ -143,6 +149,10 @@ export class App {
   get active(): SceneObject | null { return this.scene.active; }
   get editObj(): SceneObject | null { return this.isEditLike ? this.scene.active : null; }
   get isEditLike() { return this.mode === 'edit' || this.mode === 'uv'; }
+  /** Active object when it is an armature. */
+  get armObj(): SceneObject | null { return this.active?.armature ? this.active : null; }
+  /** Edit-mode picking sees through surfaces (x-ray, or bones that sit inside meshes). */
+  private get seeThrough() { return this.vp.settings.xray || !!this.editObj?.armature; }
 
   /* ================================================================ persistence */
   async autosave() {
@@ -198,9 +208,9 @@ export class App {
     if (s) { this.afterRestore(); this.status(`Redo ${s.label}`); }
   }
   private afterRestore() {
-    if (this.isEditLike || this.mode === 'sculpt') {
+    if (this.mode !== 'object') {
       const a = this.active;
-      if (!a || (this.mode === 'sculpt' && !a.mesh.faces.length)) this.setMode('object');
+      if (!a || ((this.mode === 'sculpt' || this.mode === 'weight') && !a.mesh.faces.length) || (this.mode === 'pose' && !a.armature)) this.setMode('object');
     }
     this.changed();
   }
@@ -221,6 +231,9 @@ export class App {
     if (m !== 'object') {
       if (!a) { this.status('Select an object first'); return; }
       if (m === 'sculpt' && !a.mesh.faces.length) { this.status('Sculpting needs a mesh with faces'); return; }
+      if (a.armature && (m === 'sculpt' || m === 'uv' || m === 'weight')) { this.status('Armatures have Object, Edit and Pose modes'); return; }
+      if (!a.armature && m === 'pose') { this.status('Pose mode is for armatures'); return; }
+      if (m === 'weight' && !a.mesh.faces.length) { this.status('Weight painting needs a mesh with faces'); return; }
       this.scene.selected = new Set([a.id]);
       a.visible = true;
     }
@@ -229,6 +242,8 @@ export class App {
     this.preselect = null;
     this.loopPreview = null;
     if (m === 'uv') this.vp.settings.checker = true;
+    if (m === 'weight') this.ensureWeightGroup();
+    if (a?.armature && m === 'edit') this.selectMode = this.selectMode === 'face' ? 'vert' : this.selectMode;
     this.emit('mode');
     this.changed();
   }
@@ -248,7 +263,7 @@ export class App {
     this.changed();
   }
 
-  setTool(t: EditTool) { this.tool = t; this.loopPreview = null; this.emit('mode'); this.redraw(); }
+  setTool(t: EditTool) { if (t !== 'select' && this.armGuard()) return; this.tool = t; this.loopPreview = null; this.emit('mode'); this.redraw(); }
 
   /* ================================================================ navigation */
   zoomAt(f: number, x: number, y: number) {
@@ -313,6 +328,15 @@ export class App {
       for (const v of vs) box.expandByPoint(v3(a.mesh.verts[v]).applyMatrix4(M));
       return box.getCenter(new THREE.Vector3());
     }
+    if (this.mode === 'pose') {
+      const o = this.armObj;
+      if (!o || !o.armature!.selected.length) return null;
+      const ends = this.vp.boneEndsWorld(o);
+      const c = new THREE.Vector3();
+      let n = 0;
+      for (const b of o.armature!.selected) if (ends[b]) { c.add(ends[b][0]); n++; }
+      return n ? c.divideScalar(n) : null;
+    }
     if (this.mode === 'object') {
       const objs = this.selectedObjects();
       if (!objs.length) return null;
@@ -354,6 +378,11 @@ export class App {
       const pr = this.settings.proportional;
       if (pr.enabled) t.prop = buildProp(a, vs, this.vp.objectMatrix(a), pr.radius, pr.falloff, pr.radius * 3);
       return t;
+    }
+    if (this.mode === 'pose') {
+      const o = this.armObj;
+      if (!o || !o.armature!.selected.length) return null;
+      return boneTarget(o, o.armature!.selected.slice());
     }
     if (this.mode === 'object') {
       const objs = this.selectedObjects();
@@ -424,7 +453,7 @@ export class App {
    */
   startParamOp(label: string, params: ParamDef[], op: (m: Mesh, v: number[]) => Mesh | void, opts: { heavy?: boolean; report?: (m: Mesh) => string } = {}) {
     const a = this.isEditLike ? this.editObj : this.active;
-    if (!a) return;
+    if (!a || this.armGuard() || a.armature) return;
     this.confirmModal();
     this.record(label);
     const before = a.mesh.clone();
@@ -500,8 +529,9 @@ export class App {
       };
     }
 
-    // 2. sculpt
+    // 2. sculpt / weight paint
     if (this.mode === 'sculpt') return this.beginSculpt(x, y, p);
+    if (this.mode === 'weight') return this.beginWeightPaint(x, y, p);
 
     // 2b. knife: any single-pointer drag draws a cut line
     if (this.isEditLike && this.tool === 'knife') return this.knifeHandler(x, y, p);
@@ -521,7 +551,49 @@ export class App {
       const hit = this.vp.pickObject(this.scene, x, y);
       if (hit && this.scene.selected.has(hit.obj.id)) return this.dragToMove(x, y, p, () => {});
     }
+    // 5. pose: drag a bone to rotate it about its head
+    if (this.mode === 'pose' && this.armObj) {
+      const o = this.armObj, arm = o.armature!;
+      const b = this.vp.pickBone(o, x, y, this.pickRadius(p));
+      if (b >= 0) return this.dragToRotateBone(o, arm, b, x, y, p);
+    }
     return null;
+  }
+
+  private dragToRotateBone(o: SceneObject, arm: rig.Armature, b: number, x: number, y: number, p: PInfo): ToolHandler {
+    let s: TransformSession | null = null;
+    const slop = p.type === 'touch' ? 10 : p.type === 'pen' ? 8 : 5;
+    return {
+      move: (mx, my) => {
+        if (!s) {
+          if (Math.hypot(mx - x, my - y) < slop) return;
+          if (!arm.selected.includes(b)) { arm.selected = [b]; }
+          arm.active = b;
+          this.changed();
+          s = this.startTransform('rotate', 'drag');
+          s?.beginDrag(x, y);
+        }
+        s?.drag(mx, my);
+      },
+      end: (ex, ey, ep) => { if (s) this.confirmModal(); else this.tap(ex, ey, ep, 1); },
+      cancel: () => { if (s) this.cancelModal(); },
+    };
+  }
+
+  private beginWeightPaint(x: number, y: number, p: PInfo): ToolHandler | null {
+    const a = this.active;
+    if (!a || a.armature) return null;
+    const g = this.ensureWeightGroup();
+    if (!g) { this.status('Bind the mesh to an armature first (Object mode → Rig)'); return null; }
+    this.record('Weight paint');
+    this.stroking = true;
+    const stroke = new WeightStroke(a, this.vp, this.wbrush, g, () => this.redraw(), (changed) => {
+      this.stroking = false;
+      if (!changed) this.history.cancelLast();
+      this.changed();
+    }, () => this.keyInvert);
+    if (!stroke.begin(x, y, p) && p.type === 'touch') { this.stroking = false; this.history.cancelLast(); return null; }
+    return stroke;
   }
 
   private gizmoDrag(h: GizmoHandle, x: number, y: number): ToolHandler {
@@ -633,7 +705,8 @@ export class App {
       this.selectObject(hit?.obj ?? null, op);
       return;
     }
-    if (this.mode === 'sculpt') return;
+    if (this.mode === 'sculpt' || this.mode === 'weight') return;
+    if (this.mode === 'pose') { this.selectBoneAt(x, y, p, op); return; }
     const a = this.editObj;
     if (!a) return;
     if (this.tool === 'loopcut') {
@@ -682,7 +755,7 @@ export class App {
     const m = a.mesh;
     this.vp.cam.update();
     const camKey = this.vp.cam.camera.matrixWorld.elements.map((x) => x.toFixed(5)).join(',') + this.vp.cam.distance + this.vp.width + this.vp.height + this.vp.cam.ortho;
-    const key = `${a.id}|${m.version}|${camKey}|${this.vp.settings.xray}|${a.position}|${a.rotation}|${a.scale}`;
+    const key = `${a.id}|${m.version}|${camKey}|${this.seeThrough}|${a.position}|${a.rotation}|${a.scale}`;
     if (this.projCache?.key === key) return this.projCache;
     const M = this.vp.objectMatrix(a);
     const n = m.verts.length;
@@ -693,7 +766,7 @@ export class App {
       w.set(...m.verts[i]).applyMatrix4(M);
       const s = this.vp.project(w);
       pts[i * 2] = s.x; pts[i * 2 + 1] = s.y;
-      vis[i] = s.behind ? 0 : this.vp.settings.xray ? 1 : this.vp.isVisible(w) ? 1 : 0;
+      vis[i] = s.behind ? 0 : this.seeThrough ? 1 : this.vp.isVisible(w) ? 1 : 0;
     }
     this.projCache = { key, pts, vis };
     return this.projCache;
@@ -721,7 +794,7 @@ export class App {
       const ax = P.pts[e.a * 2], ay = P.pts[e.a * 2 + 1], bx = P.pts[e.b * 2], by = P.pts[e.b * 2 + 1];
       const d = segDist(x, y, ax, ay, bx, by);
       if (d >= bd) continue;
-      if (!this.vp.settings.xray && !P.vis[e.a] && !P.vis[e.b]) {
+      if (!this.seeThrough && !P.vis[e.a] && !P.vis[e.b]) {
         // check midpoint visibility for long edges whose ends are hidden
         const mid = v3(a.mesh.verts[e.a]).add(v3(a.mesh.verts[e.b])).multiplyScalar(0.5).applyMatrix4(M);
         if (!this.vp.isVisible(mid)) continue;
@@ -809,6 +882,21 @@ export class App {
       this.changed();
       return;
     }
+    if (this.mode === 'pose') {
+      const o = this.armObj;
+      if (!o) return;
+      const arm = o.armature!;
+      const sel = new Set(op === 'set' ? [] : arm.selected);
+      this.vp.boneEndsWorld(o).forEach(([h, t], i) => {
+        const s = this.vp.project(h.clone().lerp(t, 0.5));
+        if (!inside(s.x, s.y)) return;
+        if (op === 'sub') sel.delete(i); else sel.add(i);
+      });
+      arm.selected = [...sel];
+      if (!sel.has(arm.active)) arm.active = arm.selected[0] ?? -1;
+      this.changed();
+      return;
+    }
     const a = this.editObj;
     if (!a) return;
     const m = a.mesh;
@@ -829,7 +917,7 @@ export class App {
         const c = v3(m.faceCenter(fi)).applyMatrix4(M);
         const s = this.vp.project(c);
         if (!inside(s.x, s.y)) return;
-        if (!this.vp.settings.xray && !this.vp.isVisible(c) && !f.v.some((v) => P.vis[v])) return;
+        if (!this.seeThrough && !this.vp.isVisible(c) && !f.v.some((v) => P.vis[v])) return;
         if (op === 'sub') m.selF.delete(fi); else m.selF.add(fi);
       });
       m.flush('face');
@@ -855,7 +943,7 @@ export class App {
     ctx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     // gizmo
-    const showGizmo = this.settings.gizmo !== 'none' && (this.mode === 'object' || this.isEditLike) && (!this.modal || (this.modal.kind === 'transform' && this.modal.flavor === 'drag'));
+    const showGizmo = this.settings.gizmo !== 'none' && (this.mode === 'object' || this.isEditLike || this.mode === 'pose') && (!this.modal || (this.modal.kind === 'transform' && this.modal.flavor === 'drag'));
     const pivot = showGizmo ? (this.modal?.kind === 'transform' ? this.modal.session.pivot.clone().applyMatrix4(this.modal.session.matrix()) : this.selectionPivot()) : null;
     this.gizmo.update(this.vp, pivot, this.settings.gizmo);
     this.gizmo.draw(ctx, this.activeHandle);
@@ -944,6 +1032,13 @@ export class App {
       }
       ctx.stroke();
     }
+    // weight brush cursor
+    if (this.mode === 'weight' && this.hover) {
+      const r = this.wbrush.radius;
+      ctx.strokeStyle = this.keyInvert ? '#6fb6ff' : '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(this.hover.x, this.hover.y, r, 0, Math.PI * 2); ctx.stroke();
+    }
     // sculpt brush cursor
     if (this.mode === 'sculpt' && this.hover) {
       let r = this.brush.radius;
@@ -976,6 +1071,7 @@ export class App {
   addPrimitive(type: PrimitiveType) {
     this.confirmModal();
     const label = PRIMITIVES.find((p) => p.type === type)!.label;
+    if (this.isEditLike && this.active && this.armGuard()) return;
     if (this.isEditLike && this.active) {
       // add into the edited mesh
       this.record(`Add ${label}`);
@@ -1035,12 +1131,19 @@ export class App {
     if (objs.length < 2 || !a) { this.status('Select 2+ objects (active receives)'); return; }
     this.record('Join');
     const Ainv = this.vp.objectMatrix(a).invert();
+    if (a.armature || objs.some((o) => o.armature)) { this.history.cancelLast(); this.status('Armatures can\'t be joined'); return; }
     for (const o of objs) {
       if (o === a) continue;
       const M = Ainv.clone().multiply(this.vp.objectMatrix(o));
       const m = o.mesh;
       const off = a.mesh.verts.length;
       for (const p of m.verts) { const v = v3(p).applyMatrix4(M); a.mesh.verts.push([v.x, v.y, v.z]); }
+      if (m.groups.length || a.mesh.groups.length) {
+        // keep vertex groups: map the joined mesh's groups onto the receiver's
+        const gmap = m.groups.map((g) => a.mesh.groupIndex(g, true));
+        while (a.mesh.vw.length < off) a.mesh.vw.push([]);
+        for (let i = 0; i < m.verts.length; i++) a.mesh.vw[off + i] = m.weightsOf(i).map(([g, w]) => [gmap[g], w]);
+      }
       for (const f of m.faces) a.mesh.faces.push({ v: f.v.map((x) => x + off), uv: f.uv.map((u) => [u[0], u[1]]) });
       for (const [x, y] of m.looseEdges) a.mesh.looseEdges.push([x + off, y + off]);
       for (const k of m.seams) { const [x, y] = parseKey(k); a.mesh.seams.add(ekey(x + off, y + off)); }
@@ -1121,7 +1224,7 @@ export class App {
     this.record('Apply Modifier');
     const idx = id ? a.modifiers.findIndex((m) => m.id === id) : a.modifiers.length - 1;
     const toApply = a.modifiers.slice(0, idx + 1).filter((m) => m.enabled);
-    const res = evaluate(a.mesh, toApply);
+    const res = evaluate(a.mesh, toApply, evalContext(this.scene, a));
     a.mesh = res === a.mesh ? a.mesh : res;
     a.mesh.clearSelection();
     a.mesh.changed();
@@ -1180,9 +1283,14 @@ export class App {
   }
 
   /* ================================================================ edit-mode actions */
+  private armGuard(): boolean {
+    if (this.editObj?.armature) { this.status('Not available for armatures — use the bone tools'); return true; }
+    return false;
+  }
+
   private editOp(label: string, fn: (m: Mesh) => boolean | void): boolean {
     const a = this.editObj;
-    if (!a) return false;
+    if (!a || this.armGuard()) return false;
     this.confirmModal();
     this.record(label);
     const res = fn(a.mesh);
@@ -1194,6 +1302,7 @@ export class App {
   extrude(flavor: 'button' | 'key' = 'button') {
     const a = this.editObj;
     if (!a) return;
+    if (a.armature) return this.extrudeBone(flavor);
     const m = a.mesh;
     if (!m.selV.size) { this.status('Select something to extrude'); return; }
     this.confirmModal();
@@ -1366,7 +1475,7 @@ export class App {
   }
   duplicateElements() {
     const a = this.editObj;
-    if (!a || !a.mesh.selV.size) return;
+    if (!a || !a.mesh.selV.size || this.armGuard()) return;
     this.confirmModal();
     this.record('Duplicate');
     ops.duplicateSelection(a.mesh);
@@ -1376,6 +1485,7 @@ export class App {
   }
   separate() {
     const a = this.editObj;
+    if (this.armGuard()) return;
     if (!a || !a.mesh.selF.size) { this.status('Select faces to separate'); return; }
     this.record('Separate');
     const m = a.mesh;
@@ -1399,8 +1509,12 @@ export class App {
     this.status(`Separated into ${o.name}`);
   }
 
-  selectAll() { const a = this.editObj; if (a) { const m = a.mesh; if (m.selV.size === m.verts.length && m.verts.length) m.clearSelection(); else m.selectAll(this.selectMode); this.changed(); } else if (this.mode === 'object') { if (this.scene.selected.size === this.scene.objects.length) this.scene.selected.clear(); else this.scene.objects.forEach((o) => this.scene.selected.add(o.id)); this.changed(); } }
-  selectNone() { const a = this.editObj; if (a) { a.mesh.clearSelection(); this.changed(); } else { this.scene.selected.clear(); this.changed(); } }
+  selectAll() {
+    if (this.mode === 'pose' && this.armObj) { const arm = this.armObj.armature!; arm.selected = arm.selected.length === arm.bones.length ? [] : arm.bones.map((_, i) => i); arm.active = arm.selected.includes(arm.active) ? arm.active : arm.selected[0] ?? -1; this.changed(); return; }
+    const a = this.editObj; if (a) { const m = a.mesh; if (m.selV.size === m.verts.length && m.verts.length) m.clearSelection(); else m.selectAll(this.selectMode); this.changed(); } else if (this.mode === 'object') { if (this.scene.selected.size === this.scene.objects.length) this.scene.selected.clear(); else this.scene.objects.forEach((o) => this.scene.selected.add(o.id)); this.changed(); } }
+  selectNone() {
+    if (this.mode === 'pose' && this.armObj) { this.armObj.armature!.selected = []; this.changed(); return; }
+    const a = this.editObj; if (a) { a.mesh.clearSelection(); this.changed(); } else { this.scene.selected.clear(); this.changed(); } }
   selectInvert() { const a = this.editObj; if (a) { ops.invertSelection(a.mesh, this.selectMode); this.changed(); } }
   selectLinked() { const a = this.editObj; if (a) { ops.selectLinked(a.mesh, this.selectMode); this.changed(); } }
   selectGrow() { const a = this.editObj; if (a) { ops.growSelection(a.mesh); this.changed(); } }
@@ -1431,6 +1545,346 @@ export class App {
   }
   markSeam(on: boolean) { this.editOp(on ? 'Mark Seam' : 'Clear Seam', (m) => { if (!m.selE.size) { this.status('Select edges'); return false; } ops.markSeams(m, on); }); }
   snapCenterX() { this.editOp('Snap to X=0', (m) => ops.snapToCenterX(m)); }
+
+  /* ================================================================ rigging */
+  addArmature() {
+    this.confirmModal();
+    if (this.mode !== 'object') this.setMode('object');
+    this.record('Add Armature');
+    const { mesh, arm } = rig.singleBoneArmature();
+    const o = new SceneObject(this.scene.uniqueName('Armature'), mesh);
+    o.armature = arm;
+    const t = this.vp.cam.target;
+    o.position = [round(t.x), round(t.y), round(t.z)];
+    this.scene.add(o);
+    this.changed();
+    this.status('Added armature · Edit mode: select a joint and extrude (E) to grow bones');
+  }
+
+  private armEditOp(label: string, fn: (m: Mesh, arm: rig.Armature, o: SceneObject) => boolean | void): boolean {
+    const o = this.editObj;
+    if (!o?.armature) return false;
+    this.confirmModal();
+    this.record(label);
+    const res = fn(o.mesh, o.armature, o);
+    if (res === false) { this.history.cancelLast(); this.changed(); return false; }
+    this.changed();
+    return true;
+  }
+
+  /** Grow a new bone from every selected joint, then move the new tips. */
+  extrudeBone(flavor: 'button' | 'key' = 'button') {
+    const o = this.editObj;
+    if (!o?.armature) return;
+    const m = o.mesh, arm = o.armature;
+    if (!m.selV.size) { this.status('Select a joint to extrude from'); return; }
+    this.confirmModal();
+    this.record('Extrude Bone');
+    const tips: number[] = [];
+    for (const j of [...m.selV]) {
+      const pb = arm.bones.findIndex((b) => b.tail === j);
+      const hb = pb < 0 ? arm.bones.findIndex((b) => b.head === j) : -1;
+      const parent = pb >= 0 ? pb : hb >= 0 ? arm.bones[hb].parent : -1;
+      const nv = m.addVert(m.verts[j]);
+      const base = pb >= 0 ? arm.bones[pb].name.replace(/\.\d{3}(?=([._][LR])?$)/, '') : 'Bone';
+      arm.bones.push({ name: rig.uniqueBoneName(arm, base), parent, head: j, tail: nv, roll: 0, deform: true, pose: rig.identityPose() });
+      tips.push(nv);
+    }
+    rig.syncJointMesh(m, arm);
+    m.selV = new Set(tips.map((_, i) => m.verts.length - tips.length + i));
+    m.flush('vert');
+    this.changed();
+    this.startTransform('move', flavor, null, null, { skipRecord: true, label: 'Extrude bone', onCancel: () => this.revertLast() });
+  }
+
+  /** A new, unparented bone at the view centre. */
+  addBone() {
+    this.armEditOp('Add Bone', (m, arm, o) => {
+      const t = this.vp.cam.target.clone().applyMatrix4(this.vp.objectMatrix(o).invert());
+      const len = arm.bones.length ? arm.bones.reduce((a, b) => a + rig.boneLength(m, b), 0) / arm.bones.length : 1;
+      const h = m.addVert([t.x, t.y, t.z]);
+      const tl = m.addVert([t.x, t.y + (len || 1), t.z]);
+      arm.bones.push({ name: rig.uniqueBoneName(arm, 'Bone'), parent: -1, head: h, tail: tl, roll: 0, deform: true, pose: rig.identityPose() });
+      m.clearSelection();
+      m.selV.add(h); m.selV.add(tl);
+      rig.syncJointMesh(m, arm);
+    });
+  }
+
+  /** Bones with both joints selected, or (single joints) the bones ending there. */
+  private editBoneSelection(m: Mesh, arm: rig.Armature): number[] {
+    const full = rig.selectedEditBones(m, arm);
+    if (full.length) return full;
+    return arm.bones.map((b, i) => (m.selV.has(b.tail) ? i : -1)).filter((i) => i >= 0);
+  }
+
+  deleteBonesOp() {
+    this.armEditOp('Delete Bones', (m, arm) => {
+      const del = this.editBoneSelection(m, arm);
+      if (!del.length) { this.status('Select bones to delete'); return false; }
+      rig.deleteBones(m, arm, new Set(del));
+      m.clearSelection();
+      this.status(`Deleted ${del.length} bone${del.length > 1 ? 's' : ''}`);
+    });
+  }
+
+  subdivideBones(cuts = 1) {
+    this.armEditOp('Subdivide Bones', (m, arm) => {
+      const sel = this.editBoneSelection(m, arm);
+      if (!sel.length) { this.status('Select bones to subdivide'); return false; }
+      for (const i of sel) {
+        let cur = i;
+        const b0 = arm.bones[i];
+        const h = m.verts[b0.head], t = m.verts[b0.tail], tail = b0.tail;
+        const children = arm.bones.map((b, k) => (b.parent === i ? k : -1)).filter((k) => k >= 0);
+        for (let c = 1; c <= cuts; c++) {
+          const f = c / (cuts + 1);
+          const mid = m.addVert([h[0] + (t[0] - h[0]) * f, h[1] + (t[1] - h[1]) * f, h[2] + (t[2] - h[2]) * f]);
+          arm.bones[cur].tail = mid;
+          arm.bones.push({ name: rig.uniqueBoneName(arm, b0.name.replace(/\.\d{3}(?=([._][LR])?$)/, '')), parent: cur, head: mid, tail, roll: b0.roll, deform: b0.deform, pose: rig.identityPose() });
+          cur = arm.bones.length - 1;
+          m.selV.add(mid);
+        }
+        for (const k of children) arm.bones[k].parent = cur;
+      }
+      rig.syncJointMesh(m, arm);
+    });
+  }
+
+  /** Mirror bones on +X to −X (Name.L → Name.R), creating or updating partners. */
+  symmetrizeBones() {
+    this.armEditOp('Symmetrize', (m, arm) => {
+      const eps = 1e-4;
+      const ends = (b: rig.Bone) => [m.verts[b.head][0], m.verts[b.tail][0]];
+      const src = rig.boneOrder(arm).filter((i) => { const [a, c] = ends(arm.bones[i]); return a >= -eps && c >= -eps && (a > eps || c > eps); });
+      if (!src.length) { this.status('No bones on the +X side'); return false; }
+      const jointMap = new Map<number, number>();
+      const mirrorJoint = (j: number) => {
+        const p = m.verts[j];
+        if (Math.abs(p[0]) <= eps) return j;
+        let k = jointMap.get(j);
+        if (k !== undefined) return k;
+        k = m.verts.findIndex((q) => Math.hypot(q[0] + p[0], q[1] - p[1], q[2] - p[2]) < eps);
+        if (k < 0) k = m.addVert([-p[0], p[1], p[2]]);
+        jointMap.set(j, k);
+        return k;
+      };
+      let made = 0;
+      for (const i of src) {
+        const b = arm.bones[i];
+        if (rig.flipName(b.name) === b.name) b.name = rig.uniqueBoneName(arm, `${b.name}.L`);
+        const mname = rig.flipName(b.name);
+        const ph = mirrorJoint(b.head), pt = mirrorJoint(b.tail);
+        let pi = arm.bones.findIndex((x) => x.name === mname);
+        const parentName = b.parent >= 0 ? arm.bones[b.parent].name : null;
+        const mp = parentName === null ? -1 : Math.max(arm.bones.findIndex((x) => x.name === rig.flipName(parentName)), -1);
+        if (pi < 0) { arm.bones.push({ name: mname, parent: mp, head: ph, tail: pt, roll: -b.roll, deform: b.deform, pose: rig.identityPose() }); made++; }
+        else {
+          const mb = arm.bones[pi];
+          m.verts[mb.head] = [-m.verts[b.head][0], m.verts[b.head][1], m.verts[b.head][2]];
+          m.verts[mb.tail] = [-m.verts[b.tail][0], m.verts[b.tail][1], m.verts[b.tail][2]];
+          mb.parent = mp; mb.roll = -b.roll;
+          pi = -1;
+        }
+      }
+      rig.syncJointMesh(m, arm);
+      this.status(made ? `Mirrored ${made} bone${made > 1 ? 's' : ''} to −X` : 'Updated mirrored bones');
+    });
+  }
+
+  /** Rename a bone and the matching vertex groups of every mesh it deforms. */
+  renameBone(o: SceneObject, i: number, name: string) {
+    const arm = o.armature!;
+    const old = arm.bones[i]?.name;
+    name = name.trim();
+    if (!old || !name || name === old) return;
+    this.record('Rename Bone');
+    if (arm.bones.some((b, k) => k !== i && b.name === name)) name = rig.uniqueBoneName(arm, name);
+    arm.bones[i].name = name;
+    for (const ob of this.scene.objects) {
+      if (!ob.modifiers.some((md) => md.type === 'armature' && md.target === o.id)) continue;
+      const g = ob.mesh.groups.indexOf(old);
+      if (g >= 0) { ob.mesh.groups[g] = name; ob.mesh.weightsChanged(); }
+    }
+    if (this.weightGroup === old) this.weightGroup = name;
+    this.changed();
+  }
+
+  setBoneParent(o: SceneObject, i: number, parent: number) {
+    const arm = o.armature!;
+    if (parent === i || (parent >= 0 && rig.isAncestor(arm, i, parent))) { this.status('That would make a loop'); return; }
+    this.record('Set Parent');
+    arm.bones[i].parent = parent;
+    this.changed();
+  }
+
+  setBoneProp(o: SceneObject, i: number, label: string, f: (b: rig.Bone) => void) {
+    this.record(label);
+    f(o.armature!.bones[i]);
+    o.mesh.touch();
+    this.changed();
+  }
+
+  /** Pose mode: select the bone under the pointer. */
+  private selectBoneAt(x: number, y: number, p: PInfo, op: SelOp) {
+    const o = this.armObj;
+    if (!o) return;
+    const arm = o.armature!;
+    const b = this.vp.pickBone(o, x, y, this.pickRadius(p));
+    if (b < 0) { if (op === 'set') { arm.selected = []; } this.changed(); return; }
+    if (op === 'set') arm.selected = [b];
+    else if (op === 'add') arm.selected = arm.selected.includes(b) && arm.active === b ? arm.selected.filter((x) => x !== b) : [...new Set([...arm.selected, b])];
+    else arm.selected = arm.selected.filter((x) => x !== b);
+    arm.active = arm.selected.includes(b) ? b : arm.selected[0] ?? -1;
+    this.changed();
+  }
+
+  /** Make a bone the selected / active one (bone list in the panel). */
+  pickBoneFromList(o: SceneObject, i: number) {
+    const arm = o.armature!;
+    arm.active = i;
+    if (this.mode === 'pose') arm.selected = [i];
+    if (this.mode === 'edit' && this.editObj === o) { const b = arm.bones[i]; o.mesh.clearSelection(); o.mesh.selV.add(b.head); o.mesh.selV.add(b.tail); o.mesh.flush('vert'); }
+    this.changed();
+  }
+
+  /** Reset the pose of the selected bones (or all) to rest. */
+  clearPose(all = false) {
+    const o = this.armObj;
+    if (!o) return;
+    const arm = o.armature!;
+    const ids = all || !arm.selected.length ? arm.bones.map((_, i) => i) : arm.selected;
+    this.record(all ? 'Clear Pose' : 'Clear Bone Pose');
+    for (const i of ids) arm.bones[i].pose = rig.identityPose();
+    o.mesh.touch();
+    this.changed();
+  }
+
+  /** Armature objects in the scene, the selected / active one first. */
+  armatures(): SceneObject[] {
+    const all = this.scene.objects.filter((o) => o.armature);
+    return all.sort((a, b) => (this.scene.selected.has(b.id) ? 1 : 0) - (this.scene.selected.has(a.id) ? 1 : 0));
+  }
+
+  /** The armature a mesh is bound to (its first enabled Armature modifier). */
+  armatureOf(o: SceneObject | null): SceneObject | null {
+    const md = o?.modifiers.find((m) => m.type === 'armature' && m.target);
+    const a = md ? this.scene.byId(md.target!) : null;
+    return a?.armature ? a : null;
+  }
+
+  /**
+   * Bind the selected meshes to an armature (the selected one, else the only
+   * one) with an Armature modifier; optionally compute automatic weights.
+   */
+  bindToArmature(weights: boolean, armId?: string) {
+    this.confirmModal();
+    const armObj = armId ? this.scene.byId(armId) : this.selectedObjects().find((o) => o.armature) ?? (this.armatures().length === 1 ? this.armatures()[0] : null);
+    if (!armObj?.armature) { this.status(this.armatures().length ? 'Select the armature too (or pick one from the Rig menu)' : 'Add an armature first'); return; }
+    const meshes = this.selectedObjects().filter((o) => !o.armature && o.mesh.verts.length);
+    if (!meshes.length) { this.status('Select the mesh to bind'); return; }
+    if (!armObj.armature.bones.some((b) => b.deform)) { this.status('The armature has no deform bones'); return; }
+    this.record(weights ? 'Bind (automatic weights)' : 'Bind to armature');
+    for (const o of meshes) {
+      o.modifiers = o.modifiers.filter((m) => m.type !== 'armature');
+      const md = newModifier('armature');
+      md.target = armObj.id;
+      o.modifiers.unshift(md);
+      if (weights) autoWeights(o.mesh, armObj.mesh, armObj.armature, meshToArmature(o, armObj));
+      else for (const b of armObj.armature.bones) if (b.deform) o.mesh.groupIndex(b.name, true);
+    }
+    this.changed();
+    this.status(`Bound ${meshes.length} mesh${meshes.length > 1 ? 'es' : ''} to ${armObj.name}${weights ? ' with automatic weights' : ' · paint weights in Weight mode'}`, 4000);
+  }
+
+  unbind() {
+    const meshes = this.selectedObjects().filter((o) => o.modifiers.some((m) => m.type === 'armature'));
+    if (!meshes.length) { this.status('Selected meshes aren\'t bound'); return; }
+    this.record('Unbind');
+    for (const o of meshes) o.modifiers = o.modifiers.filter((m) => m.type !== 'armature');
+    this.changed();
+  }
+
+  /* ================================================================ weights */
+  /** Group names to paint: the bound armature's deform bones, then any other existing groups. */
+  weightGroups(o: SceneObject | null = this.active): string[] {
+    if (!o) return [];
+    const arm = this.armatureOf(o);
+    const names = arm ? arm.armature!.bones.filter((b) => b.deform).map((b) => b.name) : [];
+    for (const g of o.mesh.groups) if (!names.includes(g)) names.push(g);
+    return names;
+  }
+
+  ensureWeightGroup(): string | null {
+    const names = this.weightGroups();
+    if (!this.weightGroup || !names.includes(this.weightGroup)) this.weightGroup = names[0] ?? null;
+    this.vp.weightGroup = this.weightGroup;
+    return this.weightGroup;
+  }
+
+  setWeightGroup(name: string) {
+    this.weightGroup = name;
+    this.vp.weightGroup = name;
+    this.emit('mode');
+    this.redraw();
+  }
+
+  private weightOp(label: string, fn: (o: SceneObject) => boolean | void) {
+    const o = this.active;
+    if (!o || o.armature) return;
+    this.confirmModal();
+    this.record(label);
+    if (fn(o) === false) { this.history.cancelLast(); return; }
+    o.mesh.weightsChanged();
+    this.changed();
+  }
+
+  autoWeightsActive() {
+    this.weightOp('Automatic Weights', (o) => {
+      const a = this.armatureOf(o);
+      if (!a) { this.status('Bind the mesh to an armature first'); return false; }
+      autoWeights(o.mesh, a.mesh, a.armature!, meshToArmature(o, a));
+      this.status('Automatic weights computed');
+    });
+  }
+
+  /** Give the Edit-mode vertex selection a weight in the active group. */
+  assignSelection(weight = 1) {
+    this.weightOp(weight > 0 ? 'Assign Weights' : 'Remove Weights', (o) => {
+      const g = this.ensureWeightGroup();
+      const m = o.mesh;
+      if (!g) { this.status('No vertex group'); return false; }
+      if (!m.selV.size) { this.status('Select vertices in Edit mode first'); return false; }
+      const gi = m.groupIndex(g, true);
+      for (const v of m.selV) m.setWeight(v, gi, weight);
+      this.status(`${weight > 0 ? 'Assigned' : 'Removed'} ${m.selV.size} vertices ${weight > 0 ? 'to' : 'from'} ${g}`);
+    });
+  }
+
+  /** Limit every vertex to 4 influences that sum to 1 (what the exported skin uses). */
+  normalizeWeights() {
+    this.weightOp('Normalize Weights', (o) => {
+      const m = o.mesh;
+      if (!m.groups.length) return false;
+      for (let v = 0; v < m.verts.length; v++) m.vw[v] = topInfluences(m.weightsOf(v));
+    });
+  }
+
+  mirrorWeights() {
+    this.weightOp('Mirror Weights', (o) => {
+      if (!o.mesh.groups.length) return false;
+      mirrorWeightsX(o.mesh, ops.mirrorMap(o.mesh));
+      this.status('Weights mirrored from +X to −X');
+    });
+  }
+
+  clearWeightGroup() {
+    this.weightOp('Clear Group', (o) => {
+      const g = this.weightGroup ? o.mesh.groups.indexOf(this.weightGroup) : -1;
+      if (g < 0) return false;
+      for (let v = 0; v < o.mesh.verts.length; v++) if (o.mesh.vw[v]) o.mesh.vw[v] = o.mesh.vw[v].filter(([x]) => x !== g);
+    });
+  }
 
   /* ================================================================ UV actions */
   uvUnwrap() {
@@ -1488,7 +1942,17 @@ export class App {
     }
     if (e.key === 'Tab') { e.preventDefault(); if (this.mode === 'object' || this.mode === 'edit') this.toggleEdit(); else this.setMode('object'); return; }
     if (e.key === 'Escape') return;
-    if (e.key === 'Delete' || (k === 'x' && !ctrl)) { if (this.mode === 'object') this.deleteObjects(); else if (this.isEditLike) this.deleteElements(); return; }
+    if (e.key === 'Delete' || (k === 'x' && !ctrl)) { if (this.mode === 'object') this.deleteObjects(); else if (this.editObj?.armature) this.deleteBonesOp(); else if (this.isEditLike) this.deleteElements(); return; }
+    if (this.mode === 'pose') {
+      if (k === 'r' && e.altKey) return this.clearPose();
+    }
+    if (this.isEditLike && this.editObj?.armature) {
+      if (k === '1') return this.setSelectMode('vert');
+      if (k === '2') return this.setSelectMode('edge');
+      if (k === 'e') return this.extrudeBone('key');
+      if (k === 'l') return this.selectLinked();
+      if (k === 'g' || k === 'r' || k === 's' || k === 'a' || k === 'i' || e.key === 'Tab' || e.code.startsWith('Numpad') || k === '.' || k === 'home') { /* handled below */ } else return;
+    }
     if (k === 'g') return void this.startTransform('move', 'key');
     if (k === 'r' && !ctrl && !(this.isEditLike && e.shiftKey)) return void this.startTransform('rotate', 'key');
     if (k === 's' && !ctrl) return void this.startTransform('scale', 'key');

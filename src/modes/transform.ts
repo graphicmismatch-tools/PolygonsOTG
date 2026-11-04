@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Viewport } from '../render/viewport';
 import { SceneObject } from '../core/scene';
 import { V3 } from '../core/vec';
+import { PoseXf, Quat, clonePose, evalArmature, isAncestor, isConnected, parentBase } from '../core/armature';
 
 export type TKind = 'move' | 'rotate' | 'scale';
 export type Axis = 'x' | 'y' | 'z' | 'n' | null; // 'n' = custom (e.g. normal)
@@ -49,7 +50,14 @@ export interface ObjTarget {
   objs: SceneObject[];
   orig: { pos: V3; rot: V3; scale: V3 }[];
 }
-export type TTarget = VertTarget | ObjTarget;
+/** Pose-mode bones of an armature object. */
+export interface BoneTarget {
+  kind: 'bones';
+  obj: SceneObject;
+  bones: number[];
+  orig: PoseXf[];
+}
+export type TTarget = VertTarget | ObjTarget | BoneTarget;
 
 const AXES: Record<'x' | 'y' | 'z', THREE.Vector3> = {
   x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1),
@@ -100,6 +108,12 @@ export class TransformSession {
       const box = new THREE.Box3();
       for (const p of t.orig) box.expandByPoint(new THREE.Vector3(...p).applyMatrix4(m));
       return box.getCenter(c);
+    }
+    if (t.kind === 'bones') {
+      const ev = evalArmature(t.obj.mesh, t.obj.armature!);
+      const W = this.vp.objectMatrix(t.obj);
+      for (const b of t.bones) c.add(new THREE.Vector3().setFromMatrixPosition(ev.posed[b]).applyMatrix4(W));
+      return c.divideScalar(Math.max(1, t.bones.length));
     }
     for (const o of t.orig) c.add(new THREE.Vector3(...o.pos));
     return c.divideScalar(Math.max(1, t.orig.length));
@@ -273,6 +287,8 @@ export class TransformSession {
         }
       }
       mesh.touch();
+    } else if (t.kind === 'bones') {
+      this.applyBones(t, M);
     } else {
       t.objs.forEach((o, i) => {
         const orig = t.orig[i];
@@ -308,9 +324,53 @@ export class TransformSession {
     this.onChange();
   }
 
+  /**
+   * Pose bones: rotation & scale act about each bone's own head (so chains bend
+   * at their joints), moves translate bones that aren't connected to a parent.
+   */
+  private applyBones(t: BoneTarget, M: THREE.Matrix4) {
+    const arm = t.obj.armature!;
+    t.bones.forEach((b, i) => { arm.bones[b].pose = clonePose(t.orig[i]); });
+    const set = new Set(t.bones);
+    const top = t.bones.filter((b) => !t.bones.some((o) => o !== b && set.has(o) && isAncestor(arm, o, b)));
+    const ev = evalArmature(t.obj.mesh, arm);
+    const restInv = ev.rest.map((m) => m.clone().invert());
+    const W = this.vp.objectMatrix(t.obj);
+    const L = W.clone().invert().multiply(M).multiply(W); // armature-space transform
+    const lin = new THREE.Matrix4().extractRotation(L);
+    if (this.kind === 'scale') lin.copy(L).setPosition(0, 0, 0);
+    for (const b of top) {
+      const P = ev.posed[b];
+      let Pn: THREE.Matrix4;
+      if (this.kind === 'move') {
+        if (isConnected(arm, b)) continue;
+        Pn = L.clone().multiply(P);
+      } else {
+        const h = new THREE.Vector3().setFromMatrixPosition(P);
+        Pn = new THREE.Matrix4().makeTranslation(h.x, h.y, h.z).multiply(lin).multiply(new THREE.Matrix4().makeTranslation(-h.x, -h.y, -h.z)).multiply(P);
+      }
+      const base = parentBase(arm, b, ev.rest, restInv, ev.posed);
+      const local = base.invert().multiply(Pn);
+      const pos = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+      local.decompose(pos, q, sc);
+      const o = t.orig[t.bones.indexOf(b)];
+      const pose = arm.bones[b].pose;
+      if (this.kind === 'rotate') { pose.rot = [q.x, q.y, q.z, q.w] as Quat; pose.loc = isConnected(arm, b) ? [...o.loc] as V3 : [pos.x, pos.y, pos.z]; }
+      else if (this.kind === 'scale') { pose.scale = [sc.x, sc.y, sc.z]; }
+      else pose.loc = [pos.x, pos.y, pos.z];
+    }
+    t.obj.mesh.touch();
+  }
+
   /** Restore original state. */
   cancel() {
     const t = this.target;
+    if (t.kind === 'bones') {
+      t.bones.forEach((b, i) => { t.obj.armature!.bones[b].pose = clonePose(t.orig[i]); });
+      t.obj.mesh.touch();
+      this.onChange();
+      return;
+    }
     if (t.kind === 'verts') {
       const mesh = t.obj.mesh;
       t.verts.forEach((vi, i) => { mesh.verts[vi] = [...t.orig[i]] as V3; });
@@ -384,4 +444,8 @@ export function buildProp(obj: SceneObject, selected: number[], world: THREE.Mat
 
 export function objTarget(objs: SceneObject[]): ObjTarget {
   return { kind: 'objects', objs, orig: objs.map((o) => ({ pos: [...o.position] as V3, rot: [...o.rotation] as V3, scale: [...o.scale] as V3 })) };
+}
+
+export function boneTarget(obj: SceneObject, bones: number[]): BoneTarget {
+  return { kind: 'bones', obj, bones, orig: bones.map((b) => clonePose(obj.armature!.bones[b].pose)) };
 }

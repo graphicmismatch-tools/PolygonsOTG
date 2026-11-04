@@ -2,8 +2,11 @@ import { Mesh, Face, ekey } from './mesh';
 import { V2, V3, avg2, avg3, lerp2 } from './vec';
 import { remesh, RemeshMode, defaultRemeshSize } from './remesh';
 import { decimate, DecimateMode } from './decimate';
+import { flipName } from './armature';
+import { deformMesh } from './skin';
+import type { Matrix4 } from 'three';
 
-export type ModifierType = 'mirror' | 'subsurf' | 'remesh' | 'decimate';
+export type ModifierType = 'mirror' | 'subsurf' | 'remesh' | 'decimate' | 'armature';
 
 /** Modifiers too slow to re-run on every edit (deferred while dragging, hidden in edit mode). */
 export const HEAVY_MODIFIERS: ModifierType[] = ['remesh', 'decimate'];
@@ -29,6 +32,13 @@ export interface Modifier {
   angle?: number;
   delimitSeams?: boolean;
   keepBoundary?: boolean;
+  /** armature: id of the armature object that deforms this mesh */
+  target?: string;
+}
+
+/** Scene access the armature modifier needs: mesh-space skin matrices of an armature object. */
+export interface EvalContext {
+  skin(targetId: string): Map<string, Matrix4> | null;
 }
 
 export function newModifier(type: ModifierType, mesh?: Mesh): Modifier {
@@ -38,16 +48,22 @@ export function newModifier(type: ModifierType, mesh?: Mesh): Modifier {
     case 'subsurf': return { id, type, enabled: true, levels: 1 };
     case 'remesh': return { id, type, enabled: true, remeshMode: 'voxel', size: mesh ? defaultRemeshSize(mesh, 1 / 40) : 0.05, smooth: 1, project: true, iterations: 4, quads: false };
     case 'decimate': return { id, type, enabled: true, decimateMode: 'collapse', ratio: 0.5, quads: true, keepBoundary: true, iterations: 1, angle: 5, delimitSeams: false };
+    case 'armature': return { id, type, enabled: true, target: '' };
   }
 }
 
 /** Evaluate the modifier stack and return a new mesh (no selection data). */
-export function evaluate(base: Mesh, mods: Modifier[]): Mesh {
+export function evaluate(base: Mesh, mods: Modifier[], ctx?: EvalContext): Mesh {
   let m = base;
   let copied = false;
   for (const mod of mods) {
     if (!mod.enabled) continue;
     if (!copied) { m = stripSelection(base); copied = true; }
+    if (mod.type === 'armature') {
+      const skin = mod.target && ctx ? ctx.skin(mod.target) : null;
+      if (skin) m = deformMesh(m, skin);
+      continue;
+    }
     if (mod.type === 'mirror') m = mirror(m, mod.axis ?? 0, mod.mergeDist ?? 0.001);
     else if (mod.type === 'subsurf') for (let i = 0; i < Math.min(4, mod.levels ?? 1); i++) m = catmullClark(m);
     else if (mod.type === 'remesh') m = remesh(m, { mode: mod.remeshMode ?? 'voxel', size: mod.size ?? 0.05, smooth: mod.smooth, project: mod.project, iterations: mod.iterations, quads: mod.quads });
@@ -62,6 +78,7 @@ function stripSelection(src: Mesh): Mesh {
   m.faces = src.faces.map((f) => ({ v: f.v.slice(), uv: f.uv.map((u) => [u[0], u[1]] as V2) }));
   m.looseEdges = src.looseEdges.map((e) => [e[0], e[1]] as [number, number]);
   m.seams = new Set(src.seams);
+  m.copyWeightsFrom(src);
   m.changed();
   return m;
 }
@@ -78,6 +95,12 @@ export function mirror(src: Mesh, axis: 0 | 1 | 2, mergeDist: number): Mesh {
     q[axis] = -q[axis];
     map[i] = m.verts.length;
     m.verts.push(q);
+  }
+  if (src.groups.length) {
+    m.copyWeightsFrom(src);
+    // mirrored copies take the opposite side's groups (Arm.L → Arm.R)
+    const flip = src.groups.map((g) => m.groupIndex(flipName(g), true));
+    for (let i = 0; i < n; i++) if (map[i] !== i) m.vw[map[i]] = src.weightsOf(i).map(([g, w]) => [flip[g], w]);
   }
   m.faces = src.faces.map((f) => ({ v: f.v.slice(), uv: f.uv.map((u) => [u[0], u[1]] as V2) }));
   for (const f of src.faces) {
@@ -131,6 +154,13 @@ export function catmullClark(src: Mesh): Mesh {
   out.verts.push(...facePts);
   const eBase = out.verts.length;
   out.verts.push(...edgePts);
+  if (src.groups.length) {
+    // weights follow the simple averages (vertex keeps its own, face/edge points blend their corners)
+    out.groups = src.groups.slice();
+    out.vw = V.map((_, i) => src.weightsOf(i).map(([g, w]) => [g, w] as [number, number]));
+    for (const f of src.faces) out.vw.push(src.blendWeights(f.v.map((v) => [v, 1 / f.v.length])));
+    for (const e of edges) out.vw.push(src.blendWeights([[e.a, 0.5], [e.b, 0.5]]));
+  }
   const eIndex = (a: number, b: number) => eBase + src.edgeIndex(ekey(a, b))!;
   const faces: Face[] = [];
   src.faces.forEach((f, fi) => {

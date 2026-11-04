@@ -3,7 +3,9 @@ import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { Mesh } from '../core/mesh';
-import { Scene, SceneObject } from '../core/scene';
+import { Scene, SceneObject, evalContext } from '../core/scene';
+import { evalArmature } from '../core/armature';
+import { topInfluences } from '../core/skin';
 import { evaluate } from '../core/modifiers';
 import { buildGeometry } from '../render/geometry';
 import { V2, V3, polyNormal } from '../core/vec';
@@ -17,11 +19,12 @@ const objMatrix = (o: SceneObject) =>
 const fmt = (x: number) => (Math.abs(x) < 1e-9 ? '0' : x.toFixed(6).replace(/\.?0+$/, ''));
 
 /* ------------------------------------------------------------------ OBJ */
-export function exportOBJ(objects: SceneObject[], applyModifiers = true): string {
+export function exportOBJ(objects: SceneObject[], applyModifiers = true, scene?: Scene): string {
   const out: string[] = ['# Exported from Polygons OTG', ''];
   let vOff = 1, vtOff = 1, vnOff = 1;
   for (const o of objects) {
-    const m = applyModifiers ? evaluate(o.mesh, o.modifiers) : o.mesh;
+    if (o.armature) continue;
+    const m = applyModifiers ? evaluate(o.mesh, o.modifiers, scene ? evalContext(scene, o) : undefined) : o.mesh;
     const M = objMatrix(o);
     const N = new THREE.Matrix3().getNormalMatrix(M);
     out.push(`o ${o.name.replace(/\s+/g, '_')}`);
@@ -83,10 +86,11 @@ export function importOBJ(text: string): { name: string; mesh: Mesh }[] {
 }
 
 /* ------------------------------------------------------------------ STL */
-export function exportSTL(objects: SceneObject[]): ArrayBuffer {
+export function exportSTL(objects: SceneObject[], scene?: Scene): ArrayBuffer {
   const tris: number[][] = [];
   for (const o of objects) {
-    const m = evaluate(o.mesh, o.modifiers);
+    if (o.armature) continue;
+    const m = evaluate(o.mesh, o.modifiers, scene ? evalContext(scene, o) : undefined);
     const M = objMatrix(o);
     const W = m.verts.map((p) => { const v = new THREE.Vector3(...p).applyMatrix4(M); return [v.x, v.y, v.z] as V3; });
     for (const f of m.faces) {
@@ -107,19 +111,78 @@ export function exportSTL(objects: SceneObject[]): ArrayBuffer {
 }
 
 /* ------------------------------------------------------------------ glTF */
-export async function exportGLB(objects: SceneObject[], getTexture: (url: string) => THREE.Texture): Promise<ArrayBuffer> {
+/**
+ * glTF binary. Meshes bound to an armature export as skinned meshes (rest pose,
+ * up to 4 joints per vertex) with the armature as a bone hierarchy; armatures
+ * referenced by exported meshes are included automatically.
+ */
+export async function exportGLB(objects: SceneObject[], getTexture: (url: string) => THREE.Texture, scene?: Scene): Promise<ArrayBuffer> {
   const root = new THREE.Scene();
+  // armatures: explicitly exported, or needed by an exported mesh
+  const armIds = new Set<string>();
   for (const o of objects) {
-    const m = evaluate(o.mesh, o.modifiers);
+    if (o.armature) armIds.add(o.id);
+    for (const md of o.modifiers) if (md.type === 'armature' && md.enabled && md.target && scene?.byId(md.target)?.armature) armIds.add(md.target);
+  }
+  const skeletons = new Map<string, { bones: THREE.Bone[]; skeleton: THREE.Skeleton; index: Map<string, number>; root: number }>();
+  for (const id of armIds) {
+    const a = objects.find((o) => o.id === id) ?? scene?.byId(id);
+    if (!a?.armature) continue;
+    const node = new THREE.Object3D();
+    node.name = a.name;
+    node.position.set(...a.position);
+    node.rotation.set(...a.rotation);
+    node.scale.set(...a.scale);
+    root.add(node);
+    const ev = evalArmature(a.mesh, a.armature, false);
+    const arm = a.armature;
+    const bones = arm.bones.map((b) => { const bone = new THREE.Bone(); bone.name = b.name; return bone; });
+    arm.bones.forEach((b, i) => {
+      const parent = b.parent >= 0 && b.parent < bones.length ? b.parent : -1;
+      const local = parent >= 0 ? ev.rest[parent].clone().invert().multiply(ev.rest[i]) : ev.rest[i].clone();
+      local.decompose(bones[i].position, bones[i].quaternion, bones[i].scale);
+      (parent >= 0 ? bones[parent] : node).add(bones[i]);
+    });
+    node.updateMatrixWorld(true);
+    const skeleton = new THREE.Skeleton(bones, bones.map((bone) => bone.matrixWorld.clone().invert()));
+    const index = new Map(arm.bones.map((b, i) => [b.name, i] as [string, number]));
+    skeletons.set(id, { bones, skeleton, index, root: Math.max(0, arm.bones.findIndex((b) => b.parent < 0)) });
+  }
+  for (const o of objects) {
+    if (o.armature) continue;
+    const armMod = o.modifiers.find((md) => md.type === 'armature' && md.enabled && md.target && skeletons.has(md.target));
+    // the skin carries the deformation, so the mesh is exported in its rest shape
+    const m = evaluate(o.mesh, o.modifiers.filter((md) => md.type !== 'armature'));
     const built = buildGeometry(m, o.smooth);
     const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(o.material.color), roughness: o.material.roughness, metalness: o.material.metalness });
     if (o.material.texture) { mat.map = getTexture(o.material.texture); mat.color.set('#ffffff'); }
-    const mesh = new THREE.Mesh(built.geometry, mat);
+    let mesh: THREE.Mesh;
+    if (armMod) {
+      const sk = skeletons.get(armMod.target!)!;
+      const gmap = m.groups.map((g) => sk.index.get(g) ?? -1);
+      const cv = built.cornerVert;
+      const si = new Uint16Array(cv.length * 4), sw = new Float32Array(cv.length * 4);
+      const perVert = m.verts.map((_, v) => topInfluences(m.weightsOf(v).filter(([g]) => gmap[g] >= 0).map(([g, w]) => [gmap[g], w] as [number, number])));
+      for (let i = 0; i < cv.length; i++) {
+        const l = perVert[cv[i]];
+        // unweighted vertices follow the root bone
+        if (!l.length) { si[i * 4] = sk.root; sw[i * 4] = 1; continue; }
+        l.forEach(([b, w], k) => { si[i * 4 + k] = b; sw[i * 4 + k] = w; });
+      }
+      built.geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4));
+      built.geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
+      const sm = new THREE.SkinnedMesh(built.geometry, mat);
+      mesh = sm;
+    } else mesh = new THREE.Mesh(built.geometry, mat);
     mesh.name = o.name;
     mesh.position.set(...o.position);
     mesh.rotation.set(...o.rotation);
     mesh.scale.set(...o.scale);
     root.add(mesh);
+    if (armMod) {
+      mesh.updateMatrixWorld(true);
+      (mesh as THREE.SkinnedMesh).bind(skeletons.get(armMod.target!)!.skeleton, mesh.matrixWorld.clone());
+    }
   }
   const exporter = new GLTFExporter();
   const res = await exporter.parseAsync(root, { binary: true, onlyVisible: false });

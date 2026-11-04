@@ -1,3 +1,4 @@
+import { transferWeights } from './skin';
 import { Mesh } from './mesh';
 import { V3 } from './vec';
 import { triangulateFace } from './ops';
@@ -515,6 +516,12 @@ function isotropic(src: Mesh, L: number, iterations: number): Mesh {
 /* ------------------------------------------------------------------ entry */
 
 export function remesh(src: Mesh, opts: RemeshOptions, info?: RemeshInfo): Mesh {
+  const m = remeshImpl(src, opts, info);
+  if (m !== src) transferWeights(src, m);
+  return m;
+}
+
+function remeshImpl(src: Mesh, opts: RemeshOptions, info?: RemeshInfo): Mesh {
   if (!src.faces.length) return src;
   if (opts.mode === 'isotropic') {
     const m = isotropic(src, Math.max(opts.size, 1e-4), Math.max(1, Math.round(opts.iterations ?? 4)));

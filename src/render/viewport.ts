@@ -2,13 +2,15 @@ import * as THREE from 'three';
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
-import { Scene, SceneObject } from '../core/scene';
+import { Scene, SceneObject, evalContext, armatureKey } from '../core/scene';
+import { evalArmature, boneLength } from '../core/armature';
+import { weightColor } from '../core/skin';
 import { Mesh, parseKey } from '../core/mesh';
 import { evaluate, HEAVY_MODIFIERS } from '../core/modifiers';
 import { buildGeometry, refreshGeometry, BuiltGeometry } from './geometry';
 import { V3 } from '../core/vec';
 
-export type AppMode = 'object' | 'edit' | 'sculpt' | 'uv';
+export type AppMode = 'object' | 'edit' | 'sculpt' | 'uv' | 'pose' | 'weight';
 
 export interface ViewSettings {
   xray: boolean;
@@ -98,6 +100,12 @@ class ObjectView {
   overlayKey = '';
   textureKey = '';
   depthMesh: THREE.Mesh;
+  // armature display
+  bones: LineSegments2 | null = null;
+  boneKey = '';
+  /** posed head / tail of each bone in object space */
+  boneEnds: [THREE.Vector3, THREE.Vector3][] = [];
+  weightKey = '';
 
   constructor(public obj: SceneObject, depthMat: THREE.Material) {
     this.material = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.75, metalness: 0, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
@@ -114,6 +122,7 @@ class ObjectView {
     this.material.map?.dispose();
     this.disposeOverlay();
     this.outline?.geometry.dispose();
+    this.bones?.geometry.dispose();
   }
 
   disposeOverlay() {
@@ -161,6 +170,9 @@ export class Viewport {
   /** Set while a transform / stroke is running: heavy modifiers aren't re-evaluated. */
   deferHeavy = false;
   settings: ViewSettings = { xray: false, wireframe: false, showModifiersInEdit: true, checker: false, showGrid: true };
+  /** Vertex group shown as a heat map in weight mode. */
+  weightGroup: string | null = null;
+  private boneMat: LineMaterial;
 
   constructor(public canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' });
@@ -200,6 +212,7 @@ export class Viewport {
     });
     this.lineMat = new LineMaterial({ linewidth: 1.6, vertexColors: true, worldUnits: false });
     this.lineMatXray = new LineMaterial({ linewidth: 1.6, vertexColors: true, worldUnits: false, depthTest: false, transparent: true });
+    this.boneMat = new LineMaterial({ linewidth: 1.6, vertexColors: true, worldUnits: false, depthTest: false, transparent: true });
     this.outlineMat = new LineMaterial({ linewidth: 1.2, color: 0xe08a2c, worldUnits: false });
     this.outlineMatActive = new LineMaterial({ linewidth: 1.6, color: 0xffb347, worldUnits: false });
     this.faceSelMat = new THREE.MeshBasicMaterial({ color: 0xff9a1f, transparent: true, opacity: 0.32, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
@@ -217,7 +230,7 @@ export class Viewport {
     this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(this.width, this.height, false);
     this.cam.aspect = this.width / this.height;
-    for (const m of [this.lineMat, this.lineMatXray, this.outlineMat, this.outlineMatActive]) m.resolution.set(this.width, this.height);
+    for (const m of [this.lineMat, this.lineMatXray, this.outlineMat, this.outlineMatActive, this.boneMat]) m.resolution.set(this.width, this.height);
     this.pointMat.uniforms.size.value = (matchMedia('(pointer: coarse)').matches ? 9 : 7) * dpr;
     this.requestRender();
   }
@@ -267,11 +280,12 @@ export class Viewport {
     v.group.scale.set(...o.scale);
     v.group.updateMatrixWorld(true);
     const isActive = scene.activeId === o.id;
-    const editing = isActive && (mode === 'edit' || mode === 'uv' || mode === 'sculpt');
-    const useMods = !(editing && (mode === 'sculpt' || !this.settings.showModifiersInEdit));
-    const mods = useMods ? o.modifiers.filter((m) => m.enabled && !(editing && HEAVY_MODIFIERS.includes(m.type))) : [];
+    const editing = isActive && (mode === 'edit' || mode === 'uv' || mode === 'sculpt' || mode === 'weight');
+    const useMods = !(editing && (mode === 'sculpt' || mode === 'weight' || !this.settings.showModifiersInEdit));
+    // armature deformation is shown in object / pose mode only: edits happen on the rest shape
+    const mods = useMods ? o.modifiers.filter((m) => m.enabled && !(editing && (HEAVY_MODIFIERS.includes(m.type) || m.type === 'armature'))) : [];
     const heavy = mods.some((m) => HEAVY_MODIFIERS.includes(m.type));
-    const modsKey = JSON.stringify(mods);
+    const modsKey = JSON.stringify(mods) + (mods.some((m) => m.type === 'armature') ? armatureKey(scene, o) : '');
     const key = `${modsKey}|${o.smooth}`;
     // display geometry
     if (!mods.length) {
@@ -287,7 +301,7 @@ export class Viewport {
       const stale = heavy && this.deferHeavy && v.built && v.displayKey.startsWith(`${key}|v`);
       if (v.displayKey !== fullKey && !stale) {
         if (v.built && v.built !== v.cage) v.built.geometry.dispose();
-        v.evalMesh = evaluate(o.mesh, mods);
+        v.evalMesh = evaluate(o.mesh, mods, evalContext(scene, o));
         v.built = buildGeometry(v.evalMesh, o.smooth);
         v.display.geometry = v.built.geometry;
         v.displayKey = fullKey;
@@ -307,14 +321,19 @@ export class Viewport {
       mat.needsUpdate = true;
     }
     if (texKey === 'checker') mat.color.set('#ffffff');
-    const xray = editing && mode !== 'sculpt' && this.settings.xray;
+    // weight paint heat map
+    const showWeights = editing && mode === 'weight';
+    if (showWeights) this.syncWeightColors(v);
+    if (mat.vertexColors !== showWeights) { mat.vertexColors = showWeights; mat.needsUpdate = true; }
+    if (showWeights) { mat.color.set('#ffffff'); if (mat.map) { mat.map = null; v.textureKey = ''; mat.needsUpdate = true; } }
+    const xray = editing && mode !== 'sculpt' && (this.settings.xray || !!o.armature);
     mat.transparent = xray;
     mat.opacity = xray ? 0.35 : 1;
     mat.depthWrite = !xray;
     mat.wireframe = this.settings.wireframe && !editing;
 
     // object-mode selection outline
-    const showOutline = mode === 'object' && scene.selected.has(o.id) || (this.settings.wireframe && !editing);
+    const showOutline = !o.armature && (mode === 'object' && scene.selected.has(o.id) || (this.settings.wireframe && !editing));
     if (showOutline) {
       const okey = `${v.displayKey}|${o.mesh.version}`;
       if (!v.outline || v.outlineKey !== okey) {
@@ -335,8 +354,12 @@ export class Viewport {
     } else if (v.outline) v.outline.visible = false;
 
     // edit overlays
-    if (editing && mode !== 'sculpt') this.syncOverlay(v, xray);
+    if (editing && mode !== 'sculpt' && mode !== 'weight') this.syncOverlay(v, xray);
     else if (v.points) v.disposeOverlay();
+
+    // bones
+    if (o.armature) this.syncBones(v, scene, mode, editing);
+    else if (v.bones) { v.group.remove(v.bones); v.bones.geometry.dispose(); v.bones = null; v.boneEnds = []; }
 
     // cage geometry used for picking / depth
     if (editing) {
@@ -349,6 +372,82 @@ export class Viewport {
       if (v.cage && v.cage !== v.built) v.cage.geometry.dispose();
       v.cage = null;
     }
+  }
+
+  private syncWeightColors(v: ObjectView) {
+    const m = v.obj.mesh;
+    const b = v.built;
+    if (!b) return;
+    const g = this.weightGroup ? m.groups.indexOf(this.weightGroup) : -1;
+    const key = `${b.topoId}|${b.version}|${m.weightId}|${g}|${b.geometry.id}`;
+    if (v.weightKey === key && b.geometry.getAttribute('color')) return;
+    v.weightKey = key;
+    const cv = b.cornerVert;
+    const col = new Float32Array(cv.length * 3);
+    const perVert = m.verts.map((_, i) => weightColor(g >= 0 ? m.weight(i, g) : 0));
+    for (let i = 0; i < cv.length; i++) col.set(perVert[cv[i]] ?? [0, 0, 0.5], i * 3);
+    b.geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  }
+
+  private syncBones(v: ObjectView, scene: Scene, mode: AppMode, editing: boolean) {
+    const o = v.obj, arm = o.armature!, m = o.mesh;
+    const isActive = scene.activeId === o.id;
+    // weight painting happens on the rest shape, so bound rigs are shown at rest too
+    const rest = (isActive && mode === 'edit') || mode === 'weight';
+    const posing = isActive && mode === 'pose';
+    const objSel = mode === 'object' && scene.selected.has(o.id);
+    const key = `${m.version}|${rest}|${posing}|${objSel}|${isActive}|${arm.selected}|${arm.active}|` + arm.bones.map((b) => `${b.parent}:${b.head}:${b.tail}:${b.roll}:${b.pose.rot}:${b.pose.loc}:${b.pose.scale}`).join(';');
+    if (v.bones && v.boneKey === key) return;
+    v.boneKey = key;
+    const ev = evalArmature(m, arm, !rest);
+    const pos: number[] = [], col: number[] = [];
+    const sel = new Set(arm.selected);
+    const base = new THREE.Color(rest ? '#7d838f' : '#b8bcc6');
+    const cSel = new THREE.Color('#59b8ff'), cAct = new THREE.Color('#a8deff');
+    const cObj = new THREE.Color(isActive ? '#ffb347' : '#e08a2c');
+    v.boneEnds = [];
+    arm.bones.forEach((b, i) => {
+      const L = boneLength(m, b) || 0.001;
+      const M = ev.posed[i];
+      const P = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z).applyMatrix4(M);
+      const head = P(0, 0, 0), tail = P(0, L, 0);
+      v.boneEnds.push([head, tail]);
+      const r = L * 0.1, y = L * 0.15;
+      const ring = [P(r, y, 0), P(0, y, r), P(-r, y, 0), P(0, y, -r)];
+      const segs: [THREE.Vector3, THREE.Vector3][] = [];
+      for (let k = 0; k < 4; k++) segs.push([head, ring[k]], [ring[k], ring[(k + 1) % 4]], [ring[k], tail]);
+      const c = posing ? (i === arm.active && sel.has(i) ? cAct : sel.has(i) ? cSel : base) : objSel ? cObj : base;
+      for (const [a, bb] of segs) { pos.push(a.x, a.y, a.z, bb.x, bb.y, bb.z); col.push(c.r, c.g, c.b, c.r, c.g, c.b); }
+    });
+    if (v.bones) { v.group.remove(v.bones); v.bones.geometry.dispose(); v.bones = null; }
+    if (!pos.length) return;
+    const g = new LineSegmentsGeometry();
+    g.setPositions(pos);
+    g.setColors(col);
+    v.bones = new LineSegments2(g, this.boneMat);
+    v.bones.renderOrder = 6;
+    v.group.add(v.bones);
+    void editing;
+  }
+
+  /** World-space posed bone ends of an armature object. */
+  boneEndsWorld(o: SceneObject): [THREE.Vector3, THREE.Vector3][] {
+    const v = this.views.get(o.id);
+    if (!v) return [];
+    v.group.updateMatrixWorld(true);
+    return v.boneEnds.map(([a, b]) => [a.clone().applyMatrix4(v.group.matrixWorld), b.clone().applyMatrix4(v.group.matrixWorld)]);
+  }
+
+  /** Nearest bone of an armature object to a screen point (within r px), or -1. */
+  pickBone(o: SceneObject, x: number, y: number, r: number): number {
+    let best = -1, bd = r;
+    this.boneEndsWorld(o).forEach(([a, b], i) => {
+      const sa = this.project(a), sb = this.project(b);
+      if (sa.behind && sb.behind) return;
+      const d = segDist2D(x, y, sa.x, sa.y, sb.x, sb.y);
+      if (d < bd) { bd = d; best = i; }
+    });
+    return best;
   }
 
   private syncOverlay(v: ObjectView, xray: boolean) {
@@ -434,6 +533,17 @@ export class Viewport {
       if (!o.visible) continue;
       const v = this.views.get(o.id);
       if (!v) continue;
+      if (o.armature) {
+        const bi = this.pickBone(o, x, y, 16);
+        if (bi >= 0) {
+          const [a, b] = this.boneEndsWorld(o)[bi];
+          const p = a.clone().lerp(b, 0.5);
+          // bones draw on top: prefer them over surfaces
+          const d = 0;
+          if (!best || d < best.distance) best = { obj: o, point: p, distance: d };
+        }
+        continue;
+      }
       const hits = rc.intersectObject(v.display, false);
       if (hits.length && (!best || hits[0].distance < best.distance)) best = { obj: o, point: hits[0].point, distance: hits[0].distance };
       // wire-only / point-only objects: pick by projected vertices
@@ -607,3 +717,10 @@ function makeChecker(): THREE.Texture {
 }
 
 export function v3(p: V3) { return new THREE.Vector3(p[0], p[1], p[2]); }
+
+function segDist2D(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
+  const dx = bx - ax, dy = by - ay;
+  const l2 = dx * dx + dy * dy;
+  const t = l2 > 1e-9 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
+  return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+}

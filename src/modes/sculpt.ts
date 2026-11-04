@@ -41,7 +41,7 @@ export const defaultBrush = (): BrushSettings => ({
   type: 'draw', radius: 60, strength: 0.5, invert: false, pressureStrength: true, pressureRadius: false, symmetryX: true, falloff: 'smooth', dyntopo: true, detail: 14,
 });
 
-function falloff(kind: BrushSettings['falloff'], t: number) {
+export function falloff(kind: BrushSettings['falloff'], t: number) {
   // t = dist / radius in [0,1]
   if (t >= 1) return 0;
   switch (kind) {

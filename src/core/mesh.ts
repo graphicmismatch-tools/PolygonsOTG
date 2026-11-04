@@ -31,7 +31,16 @@ export interface MeshJSON {
   selV: number[];
   selE: string[];
   selF: number[];
+  /** Vertex groups (bone names) and sparse per-vertex [group, weight] pairs. */
+  groups?: string[];
+  vw?: VW[];
 }
+
+/** Sparse vertex weights: [group index, weight] pairs. */
+export type VW = [number, number][];
+
+/** Source for a new vertex's weights: a vertex, or a weighted blend of vertices. */
+export type WeightSrc = number | [number, number][];
 
 /**
  * Polygon mesh with n-gon faces, optional loose (wire) edges, UV seams and
@@ -42,6 +51,10 @@ export class Mesh {
   faces: Face[] = [];
   looseEdges: [number, number][] = [];
   seams = new Set<string>();
+  /** Vertex group names (one per bone); empty when the mesh carries no weights. */
+  groups: string[] = [];
+  /** Per-vertex weights, parallel to verts when groups exist (missing entries = unweighted). */
+  vw: VW[] = [];
 
   selV = new Set<number>();
   selE = new Set<string>();
@@ -121,7 +134,39 @@ export class Mesh {
     return l > 1e-12 ? [n[0] / l, n[1] / l, n[2] / l] : [0, 1, 0];
   }
 
-  addVert(p: V3): number { this.verts.push([p[0], p[1], p[2]]); return this.verts.length - 1; }
+  addVert(p: V3, from?: WeightSrc): number {
+    this.verts.push([p[0], p[1], p[2]]);
+    const i = this.verts.length - 1;
+    if (this.groups.length) this.vw[i] = from === undefined ? [] : this.blendWeights(from);
+    return i;
+  }
+
+  // ---------------------------------------------------------------- weights
+  get hasWeights() { return this.groups.length > 0; }
+  weightsOf(v: number): VW { return this.vw[v] ?? []; }
+  weight(v: number, g: number): number { const e = this.vw[v]?.find((x) => x[0] === g); return e ? e[1] : 0; }
+  setWeight(v: number, g: number, w: number) {
+    const l = this.vw[v] ?? (this.vw[v] = []);
+    const i = l.findIndex((x) => x[0] === g);
+    if (w <= 1e-4) { if (i >= 0) l.splice(i, 1); return; }
+    if (i >= 0) l[i][1] = Math.min(1, w); else l.push([g, Math.min(1, w)]);
+  }
+  groupIndex(name: string, create = false): number {
+    let i = this.groups.indexOf(name);
+    if (i < 0 && create) { i = this.groups.length; this.groups.push(name); while (this.vw.length < this.verts.length) this.vw.push([]); }
+    return i;
+  }
+  /** Weighted blend of existing vertices' weights. */
+  blendWeights(from: WeightSrc): VW {
+    if (typeof from === 'number') return this.weightsOf(from).map(([g, w]) => [g, w]);
+    const acc = new Map<number, number>();
+    for (const [v, f] of from) for (const [g, w] of this.weightsOf(v)) acc.set(g, (acc.get(g) ?? 0) + w * f);
+    return [...acc].filter(([, w]) => w > 1e-4);
+  }
+  /** Bump after weights change (display refresh). */
+  weightId = 0;
+  weightsChanged() { this.weightId++; this._version++; }
+  copyWeightsFrom(src: Mesh) { this.groups = src.groups.slice(); this.vw = src.vw.map((l) => (l ? l.map(([g, w]) => [g, w] as [number, number]) : [])); }
   addFace(v: number[], uv?: V2[]): number {
     this.faces.push({ v: v.slice(), uv: uv ? uv.map((u) => [u[0], u[1]] as V2) : v.map(() => [0, 0] as V2) });
     return this.faces.length - 1;
@@ -229,9 +274,11 @@ export class Mesh {
   compact(keep: ArrayLike<number>) {
     const remap = new Int32Array(this.verts.length).fill(-1);
     const verts: V3[] = [];
-    for (let i = 0; i < this.verts.length; i++) if (keep[i]) { remap[i] = verts.length; verts.push(this.verts[i]); }
+    const vw: VW[] = [];
+    for (let i = 0; i < this.verts.length; i++) if (keep[i]) { remap[i] = verts.length; verts.push(this.verts[i]); if (this.groups.length) vw.push(this.vw[i] ?? []); }
     if (verts.length === this.verts.length) { this.changed(); return; }
     this.verts = verts;
+    if (this.groups.length) this.vw = vw;
     this.faces = this.faces.filter((f) => f.v.every((v) => remap[v] >= 0));
     for (const f of this.faces) f.v = f.v.map((v) => remap[v]);
     this.looseEdges = this.looseEdges.filter(([a, b]) => remap[a] >= 0 && remap[b] >= 0).map(([a, b]) => [remap[a], remap[b]]);
@@ -252,6 +299,7 @@ export class Mesh {
     m.selV = new Set(this.selV);
     m.selE = new Set(this.selE);
     m.selF = new Set(this.selF);
+    m.copyWeightsFrom(this);
     return m;
   }
 
@@ -264,6 +312,7 @@ export class Mesh {
       selV: [...this.selV],
       selE: [...this.selE],
       selF: [...this.selF],
+      ...(this.groups.length ? { groups: this.groups.slice(), vw: this.verts.map((_, i) => (this.vw[i] ?? []).map(([g, w]) => [g, round(w)] as [number, number])) } : {}),
     };
   }
 
@@ -276,6 +325,7 @@ export class Mesh {
     m.selV = new Set(j.selV ?? []);
     m.selE = new Set(j.selE ?? []);
     m.selF = new Set(j.selF ?? []);
+    if (j.groups?.length) { m.groups = j.groups.slice(); m.vw = m.verts.map((_, i) => (j.vw?.[i] ?? []).map(([g, w]) => [g, w] as [number, number])); }
     m.changed();
     return m;
   }

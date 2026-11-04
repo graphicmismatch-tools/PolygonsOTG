@@ -121,6 +121,17 @@ const ICONS: Record<string, IconDef> = {
   pack: { d: 'M3 3h18v18H3zM3 12h10M13 3v18M13 16h8' },
   tools: { d: 'M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4' },
   image: { d: 'M3 5h18v14H3zM3 16l5-5 4 4 3-3 6 6M16 9h.01' },
+  // rigging
+  bone: { d: 'M7 17l10-10M5 15a2.5 2.5 0 103.5 3.5M3.8 19.5L5 15M15.5 5.5A2.5 2.5 0 1019 9M19 9l1.2-4.5L15.5 5.5', solid: dot(7, 17, 1.2) },
+  modePose: { d: 'M12 3a2 2 0 100 4 2 2 0 000-4zM12 7v7M12 14l-4 7M12 14l4 7M12 9l-6 3M12 9l5-4', solid: dot(12, 9, 1.4) },
+  modeWeight: { d: 'M4 20c2-8 6-13 8-16 2 3 6 8 8 16z', fill: 'M7 20c1.5-5 3.5-8 5-10 1.5 2 3.5 5 5 10z' },
+  boneAdd: { d: 'M5 19l9-9M3 21l2-2M16 4v6M13 7h6' },
+  boneExtrude: { d: 'M4 20l7-7M11 13l7-7', solid: dot(11, 13, 2) + dot(18, 6, 1.6) },
+  rig: { d: 'M12 3v5M12 8l-6 5M12 8l6 5M6 13v6M18 13v6', solid: dot(12, 3, 1.6) + dot(12, 8, 1.6) + dot(6, 13, 1.6) + dot(18, 13, 1.6) },
+  symmetrize: { d: 'M12 3v18M9 7L4 12l5 5M15 7l5 5-5 5' },
+  clearPose: { d: 'M4 12a8 8 0 1016 0 8 8 0 00-16 0M4 4l4 4M8 4v4H4' },
+  autoWeights: { d: 'M13 2L4 14h7l-1 8 9-12h-7z', fill: 'M13 2L4 14h7l-1 8 9-12h-7z' },
+  wDraw: { d: 'M4 20c2-8 6-13 8-16 2 3 6 8 8 16z', bold: 'M8 20h8' },
 };
 
 export function icon(name: string, size = 22): SVGSVGElement {

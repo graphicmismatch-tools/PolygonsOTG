@@ -1,5 +1,6 @@
 import { Scene, SceneObject } from './scene';
 import { V3 } from './vec';
+import { cloneArmature } from './armature';
 
 /**
  * Snapshot-based undo. Low/medium poly meshes are small enough that a full
@@ -21,6 +22,7 @@ function snapObject(o: SceneObject) {
     smooth: o.smooth, visible: o.visible,
     modifiers: o.modifiers.map((m) => ({ ...m })),
     material: { ...o.material },
+    armature: o.armature ? cloneArmature(o.armature) : null,
   };
 }
 
@@ -65,6 +67,7 @@ export class History {
       obj.visible = data.visible;
       obj.modifiers = data.modifiers.map((m) => ({ ...m }));
       obj.material = { ...data.material };
+      obj.armature = data.armature ? cloneArmature(data.armature) : null;
       return obj;
     });
     this.scene.activeId = s.active;

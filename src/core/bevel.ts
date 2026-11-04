@@ -68,7 +68,7 @@ export function bevel(m: Mesh, opts: BevelOptions): boolean {
   const getSlide = (v: number, u: number) => {
     const k = slideKey(v, u);
     let id = slideVert.get(k);
-    if (id === undefined) { id = m.addVert(lerp(P[v], P[u], slideT(v, u))); slideVert.set(k, id); }
+    if (id === undefined) { id = m.addVert(lerp(P[v], P[u], slideT(v, u)), [[v, 1 - slideT(v, u)], [u, slideT(v, u)]]); slideVert.set(k, id); }
     return id;
   };
 
@@ -89,7 +89,7 @@ export function bevel(m: Mesh, opts: BevelOptions): boolean {
     if (bp && bn) {
       const tp = slideT(v, prev), tn = slideT(v, next);
       const pos = add(add(P[v], sub(lerp(P[v], P[prev], tp), P[v])), sub(lerp(P[v], P[next], tn), P[v]));
-      const id = m.addVert(pos);
+      const id = m.addVert(pos, v);
       res = [{ v: id, uv: [uv[0] + (uvP[0] - uv[0]) * tp + (uvN[0] - uv[0]) * tn, uv[1] + (uvP[1] - uv[1]) * tp + (uvN[1] - uv[1]) * tn] }];
     } else if (bp) {
       res = [{ v: getSlide(v, next), uv: lerp2(uv, uvN, slideT(v, next)) }];
@@ -120,7 +120,7 @@ export function bevel(m: Mesh, opts: BevelOptions): boolean {
         const a = P[from.v], c = P[v], b = P[to.v];
         // quadratic Bézier with the original corner as control point → rounded bevel
         const pos: V3 = [0, 1, 2].map((j) => (1 - t) * (1 - t) * a[j] + 2 * t * (1 - t) * c[j] + t * t * b[j]) as V3;
-        ids.push(m.addVert(pos));
+        ids.push(m.addVert(pos, v));
       }
       profileCache.set(k, ids);
     }

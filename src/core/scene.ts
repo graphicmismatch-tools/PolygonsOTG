@@ -1,6 +1,9 @@
 import { Mesh, MeshJSON } from './mesh';
-import { Modifier } from './modifiers';
+import * as THREE from 'three';
+import { Modifier, EvalContext } from './modifiers';
 import { V3 } from './vec';
+import { Armature, armatureFromJSON, cloneArmature } from './armature';
+import { meshSpaceSkin } from './skin';
 
 export interface Material {
   color: string;
@@ -26,6 +29,8 @@ export class SceneObject {
   visible = true;
   modifiers: Modifier[] = [];
   material: Material = defaultMaterial();
+  /** Set for armature objects: `mesh` then holds the bone joints (see core/armature). */
+  armature: Armature | null = null;
 
   constructor(name: string, mesh: Mesh) {
     this.name = name;
@@ -38,6 +43,7 @@ export class SceneObject {
       position: [...this.position] as V3, rotation: [...this.rotation] as V3, scale: [...this.scale] as V3,
       smooth: this.smooth, visible: this.visible,
       modifiers: this.modifiers.map((m) => ({ ...m })), material: { ...this.material },
+      ...(this.armature ? { armature: cloneArmature(this.armature) } : {}),
     };
   }
 
@@ -51,6 +57,7 @@ export class SceneObject {
     o.visible = j.visible !== false;
     o.modifiers = (j.modifiers ?? []).map((m) => ({ ...m }));
     o.material = { ...defaultMaterial(), ...(j.material ?? {}) };
+    if (j.armature) o.armature = armatureFromJSON(j.armature);
     return o;
   }
 }
@@ -66,6 +73,7 @@ export interface SceneObjectJSON {
   visible: boolean;
   modifiers: Modifier[];
   material: Material;
+  armature?: Armature;
 }
 
 export interface SceneJSON {
@@ -114,4 +122,37 @@ export class Scene {
     this.activeId = j.active;
     this.selected = new Set(j.selected ?? []);
   }
+}
+
+/** Object → world matrix (objects have no parenting). */
+export function objMatrix(o: SceneObject): THREE.Matrix4 {
+  return new THREE.Matrix4().compose(new THREE.Vector3(...o.position), new THREE.Quaternion().setFromEuler(new THREE.Euler(...o.rotation, 'XYZ')), new THREE.Vector3(...o.scale));
+}
+
+/** Matrix taking mesh-object local coordinates into an armature object's space. */
+export function meshToArmature(meshObj: SceneObject, armObj: SceneObject): THREE.Matrix4 {
+  return objMatrix(armObj).invert().multiply(objMatrix(meshObj));
+}
+
+/** Context for evaluating `obj`'s modifier stack inside `scene` (armature deformation). */
+export function evalContext(scene: Scene, obj: SceneObject): EvalContext {
+  return {
+    skin: (id) => {
+      const a = scene.byId(id);
+      if (!a?.armature) return null;
+      return meshSpaceSkin(a.mesh, a.armature, meshToArmature(obj, a));
+    },
+  };
+}
+
+/** Cache key that changes whenever an armature modifier's result could change. */
+export function armatureKey(scene: Scene, obj: SceneObject): string {
+  let k = '';
+  for (const m of obj.modifiers) {
+    if (m.type !== 'armature' || !m.enabled || !m.target) continue;
+    const a = scene.byId(m.target);
+    if (!a?.armature) { k += '|none'; continue; }
+    k += `|${a.mesh.version}|${a.position}|${a.rotation}|${a.scale}|${obj.position}|${obj.rotation}|${obj.scale}|` + a.armature.bones.map((b) => `${b.name}:${b.parent}:${b.roll}:${b.deform}:${b.pose.rot}:${b.pose.loc}:${b.pose.scale}`).join(';');
+  }
+  return k;
 }

@@ -35,6 +35,13 @@ It runs as an Android app (Capacitor) and, from the same code, in any modern bro
 - **UV editing:** move, rotate and scale (with axis lock), flip, rotate 90°, weld, align, fit to 0–1, and island selection.
 - **Textures:** a checker preview and image textures. You can export the UV layout as a PNG.
 
+### Rigging & weights
+- **Armatures:** Add → Armature. In Edit mode, bone joints act like vertices (tap, box select, drag, move/rotate/scale). Extrude (E) grows a child bone from the selected joint. You can also add, subdivide and delete bones, and symmetrize from +X to −X (Name.L → Name.R). The panel lists the bone hierarchy and edits each bone's name, parent, roll and whether it deforms the mesh.
+- **Binding:** select the mesh and the armature, then use Rig → Bind. It adds an Armature modifier and, optionally, automatic weights (distance to the bones, smoothed across the surface). Rig → Bind with empty groups leaves the weights for you to paint.
+- **Pose mode:** tap a bone to select it, or drag a bone to rotate it about its joint. R/G/S work too, with axis locks and typed values. Clear the pose of selected bones or the whole rig. Bound meshes deform live in Object and Pose mode.
+- **Weight mode:** paint one bone's group (blue 0 → red 1) with draw, add, subtract and smooth brushes, with pen pressure and .L/.R X symmetry. Also: automatic weights, assign or remove the Edit-mode selection, mirror, normalize, and clear group.
+- **Weights follow edits:** extrude, inset, loop cut, bevel, subdivide, knife and the rest interpolate weights for new vertices. Mirror and Subdivision modifiers carry them through, and remesh and decimate transfer them to the new mesh.
+
 ### Remesh & decimate
 Use these as modifiers or as one-step actions (the globe button in the Object and Sculpt toolbars, or Edit → Mesh tools). The modes follow Blender's Remesh and Decimate modifiers and are implemented from the published algorithms:
 
@@ -49,7 +56,7 @@ Use these as modifiers or as one-step actions (the globe button in the Object an
 
 ### Files
 - **Import:** OBJ, glTF/GLB and STL.
-- **Export:** OBJ (with UVs and normals), GLB (with materials and textures), STL and PNG screenshots.
+- **Export:** OBJ (with UVs and normals), GLB (with materials and textures, and skinned meshes with their skeleton in rest pose), STL and PNG screenshots. OBJ and STL use the current pose.
 - **Projects:** saved as `.potg` files, with autosave on the device.
 - **On Android**, exports open the share sheet: choose "Save to Files" or any app.
 
@@ -105,19 +112,20 @@ The debug APK installs directly by sideloading or with `adb install`. Add a rele
 ```
 src/
   core/      mesh (n-gons, wire edges, seams, selection), edit ops, bevel, primitives,
-             modifiers, remesh, decimate, dynamic topology, UV unwrap/packing, scene, undo
+             modifiers, remesh, decimate, dynamic topology, UV unwrap/packing, scene, undo,
+             armatures (bones, pose evaluation) and skinning (weights, auto weights)
   render/    three.js viewport, GPU geometry builder, edit overlays, picking, gizmo
-  modes/     transform sessions, sculpt brushes, UV editor
+  modes/     transform sessions, sculpt brushes, weight paint, UV editor
   input.ts   unified pointer gestures for touch / pen / mouse
   app.ts     application controller (modes, tools, selection, actions, keyboard)
   ui/        DOM UI: toolbars, chips, transform bar, properties panel, colour picker,
              theme, stylus test
   io/        OBJ / GLB / STL import and export, file access (Capacitor or browser)
 android/     Capacitor 8 Android project (stock BridgeActivity)
-tests/       vitest tests for the geometry kernel, bevel, remesh and decimate
+tests/       vitest tests for the geometry kernel, bevel, remesh, decimate and rigging
 ```
 
-The modelling kernel is plain TypeScript with no rendering dependency. three.js is only used for display.
+The modelling kernel is plain TypeScript with no rendering dependency. three.js is used for display, and its matrix maths for bone transforms.
 
 ## Limitations
 - Remeshing discards UVs and seams, so re-unwrap afterwards. The voxel grid is capped at about 3M points.
@@ -125,6 +133,9 @@ The modelling kernel is plain TypeScript with no rendering dependency. three.js 
 - LSCM unwrapping needs seams on closed shapes. Closed parts without seams fall back to smart projection.
 - Bevel needs edges with faces on both sides. Corners where three or more bevelled edges meet get a flat patch.
 - The knife cuts in straight lines from edge to edge.
+- GLB export keeps the 4 strongest bones per vertex (glTF's limit). Vertices without weights are bound to the root bone. There is no animation yet, so the skeleton exports in rest pose.
+- Automatic weights use distance to the bones, not heat diffusion: check thin parts that sit close to other bones (fingers, arms near the torso) and touch them up in Weight mode.
+- Meshes follow an armature through the Armature modifier, not object parenting: moving the armature object doesn't move a bound mesh in rest pose.
 - Edit mode stays responsive up to a few tens of thousands of faces on current tablets.
 
 ## References

@@ -87,7 +87,7 @@ export function refine(m: Mesh, c: V3, radius: number, maxLen: number, maxSplits
       const faces = emap.get(ekey(a, b));
       if (!faces || !faces.length) continue;
       if (len2(a, b) <= max2) continue;
-      const mv = m.addVert(lerp(P[a], P[b], 0.5));
+      const mv = m.addVert(lerp(P[a], P[b], 0.5), [[a, 0.5], [b, 0.5]]);
       for (const fi of faces.slice()) {
         const f = m.faces[fi];
         const n = f.v.length;

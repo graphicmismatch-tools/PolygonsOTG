@@ -1,3 +1,4 @@
+import { transferWeights } from './skin';
 import { Mesh, Face, ekey } from './mesh';
 import { V2, V3 } from './vec';
 import { triangulateFace } from './ops';
@@ -38,12 +39,18 @@ export interface DecimateOptions {
 }
 
 export function decimate(src: Mesh, o: DecimateOptions): Mesh {
+  const m = decimateImpl(src, o);
+  if (m !== src) transferWeights(src, m);
+  return m;
+}
+
+function decimateImpl(src: Mesh, o: DecimateOptions): Mesh {
   if (!src.faces.length) return src;
   if (o.mode === 'collapse') return collapseQEM(src, o.ratio ?? 0.5, !!o.quads, o.keepBoundary !== false);
   if (o.mode === 'unsubdivide') {
     let m = src;
     for (let i = 0; i < Math.max(1, Math.round(o.iterations ?? 1)); i++) {
-      const r = unsubdivide(m);
+      const r = unsubdivideImpl(m);
       if (!r) break;
       m = r;
     }
@@ -232,6 +239,12 @@ void E;
 
 /** Undo one level of quad subdivision. Returns null if the mesh isn't a subdivided quad grid. */
 export function unsubdivide(src: Mesh): Mesh | null {
+  const m = unsubdivideImpl(src);
+  if (m && m !== src) transferWeights(src, m);
+  return m;
+}
+
+function unsubdivideImpl(src: Mesh): Mesh | null {
   if (!src.faces.length || src.faces.some((f) => f.v.length !== 4)) return null;
   const m = src;
   const label = new Uint8Array(m.verts.length);

@@ -12,6 +12,7 @@ import { Axis } from '../modes/transform';
 import { V3 } from '../core/vec';
 import { Modifier } from '../core/modifiers';
 import { openInputTest } from './inputTest';
+import { WEIGHT_TOOLS } from '../modes/weightPaint';
 import { colorPicker } from './colorPicker';
 
 const MODES: { id: AppMode; label: string; icon: string }[] = [
@@ -19,9 +20,13 @@ const MODES: { id: AppMode; label: string; icon: string }[] = [
   { id: 'edit', label: 'Edit', icon: 'modeEdit' },
   { id: 'sculpt', label: 'Sculpt', icon: 'modeSculpt' },
   { id: 'uv', label: 'UV editing', icon: 'modeUV' },
+  { id: 'weight', label: 'Weight paint', icon: 'modeWeight' },
+  { id: 'pose', label: 'Pose', icon: 'modePose' },
 ];
+/** Modes offered for armature objects. */
+const ARM_MODES: AppMode[] = ['object', 'edit', 'pose'];
 
-const MOD_NAMES: Record<string, string> = { mirror: 'Mirror', subsurf: 'Subdivision', remesh: 'Remesh', decimate: 'Decimate' };
+const MOD_NAMES: Record<string, string> = { mirror: 'Mirror', subsurf: 'Subdivision', remesh: 'Remesh', decimate: 'Decimate', armature: 'Armature' };
 
 const BRUSH_ICONS: Record<string, string> = {
   draw: 'brushDraw', clay: 'brushClay', inflate: 'brushInflate', smooth: 'brushSmooth',
@@ -138,7 +143,9 @@ export class UI {
     const app = this.app;
     clear(this.topbar);
     const menuBtn = h('button', { class: 'iconbtn', tip: 'Menu', onclick: () => this.mainMenu(menuBtn) }, icon('menu'));
-    const tabs = h('div', { class: 'tabs' }, MODES.map((m) => h('button', {
+    const isArm = !!app.active?.armature;
+    const modes = MODES.filter((m) => (isArm ? ARM_MODES.includes(m.id) : m.id !== 'pose'));
+    const tabs = h('div', { class: 'tabs' }, modes.map((m) => h('button', {
       class: `tab${app.mode === m.id ? ' active' : ''}`,
       tip: `${m.label} mode`,
       onclick: () => app.setMode(m.id),
@@ -232,9 +239,9 @@ export class UI {
     this.app.confirmModal();
     const name = objs.length === 1 ? objs[0].name : 'scene';
     try {
-      if (kind === 'obj') await saveFile(`${name}.obj`, 'text/plain', exportOBJ(objs));
-      else if (kind === 'stl') await saveFile(`${name}.stl`, 'model/stl', exportSTL(objs));
-      else await saveFile(`${name}.glb`, 'model/gltf-binary', await exportGLB(objs, (u) => this.app.vp.getTexture(u)));
+      if (kind === 'obj') await saveFile(`${name}.obj`, 'text/plain', exportOBJ(objs, true, this.app.scene));
+      else if (kind === 'stl') await saveFile(`${name}.stl`, 'model/stl', exportSTL(objs, this.app.scene));
+      else await saveFile(`${name}.glb`, 'model/gltf-binary', await exportGLB(objs, (u) => this.app.vp.getTexture(u), this.app.scene));
       if (!isAndroidApp()) toast(`Exported ${name}.${kind}`);
     } catch (e) { toast(`Export failed: ${(e as Error).message}`); }
   }
@@ -279,7 +286,10 @@ export class UI {
     const transforms = () => this.group(this.btn('move', 'Move', T('move')), this.btn('rotate', 'Rotate', T('rotate')), this.btn('scale', 'Scale', T('scale')));
     if (mode === 'object') {
       this.rail.append(
-        this.group(this.menuBtn('add', 'Add mesh', () => PRIMITIVES.map((p) => ({ label: p.label, action: () => app.addPrimitive(p.type) })))),
+        this.group(
+          this.menuBtn('add', 'Add', () => [...PRIMITIVES.map((p) => ({ label: p.label, action: () => app.addPrimitive(p.type) })), { separator: true, label: '' }, { label: 'Armature', hint: 'bones', action: () => app.addArmature() }]),
+          this.menuBtn('rig', 'Rig', () => this.rigItems()),
+        ),
         transforms(),
         this.group(
           this.btn('duplicate', 'Duplicate', () => app.duplicateObjects()),
@@ -299,6 +309,55 @@ export class UI {
             { label: 'To geometry bottom', action: () => app.setOrigin('bottom') },
             { label: 'To view centre', action: () => app.setOrigin('cursor') },
           ]),
+        ),
+      );
+    } else if (mode === 'edit' && app.active?.armature) {
+      this.rail.append(
+        transforms(),
+        this.group(
+          this.btn('boneExtrude', 'Extrude bone from joint (E)', () => app.extrudeBone()),
+          this.btn('boneAdd', 'Add bone', () => app.addBone()),
+          this.btn('subdivide', 'Subdivide bone', () => app.subdivideBones()),
+          this.btn('symmetrize', 'Symmetrize +X → −X (.L → .R)', () => app.symmetrizeBones()),
+          this.btn('trash', 'Delete bones (X)', () => app.deleteBonesOp(), { cls: 'danger' }),
+        ),
+        this.group(
+          this.menuBtn('selectMenu', 'Select', () => [
+            { label: 'All / none', hint: 'A', action: () => app.selectAll() },
+            { label: 'Invert', action: () => app.selectInvert() },
+            { label: 'Linked', hint: 'L', action: () => app.selectLinked() },
+            { label: 'Grow', action: () => app.selectGrow() },
+          ]),
+        ),
+      );
+    } else if (mode === 'pose') {
+      this.rail.append(
+        this.group(this.btn('rotate', 'Rotate bones (R)', T('rotate')), this.btn('move', 'Move bones (G)', T('move')), this.btn('scale', 'Scale bones (S)', T('scale'))),
+        this.group(
+          this.btn('clearPose', 'Clear selected bones (Alt+R)', () => app.clearPose()),
+          this.menuBtn('selectMenu', 'Select', () => [{ label: 'All / none', hint: 'A', action: () => app.selectAll() }, { label: 'None', action: () => app.selectNone() }]),
+          this.menuBtn('rig', 'Pose', () => [
+            { label: 'Clear selected bones', hint: 'Alt+R', action: () => app.clearPose() },
+            { label: 'Clear whole pose (rest)', action: () => app.clearPose(true) },
+          ]),
+        ),
+      );
+    } else if (mode === 'weight') {
+      const w = app.wbrush;
+      this.rail.append(
+        this.group(...WEIGHT_TOOLS.map((t) => this.btn(t.icon, `${t.label} — ${t.hint}`, () => { w.tool = t.tool; this.renderRail(); this.renderEditBar(); }, { active: w.tool === t.tool }))),
+        this.group(
+          this.btn('mirror', 'X symmetry (.L ↔ .R)', () => { w.symmetryX = !w.symmetryX; this.renderRail(); }, { active: w.symmetryX }),
+          this.btn('autoWeights', 'Automatic weights (replaces all)', () => app.autoWeightsActive()),
+          this.menuBtn('tools', 'Weight tools', () => [
+            { label: 'Automatic weights', hint: 'from bones', action: () => app.autoWeightsActive() },
+            { label: 'Assign Edit-mode selection', hint: 'weight 1', action: () => app.assignSelection(1) },
+            { label: 'Remove Edit-mode selection', action: () => app.assignSelection(0) },
+            { label: 'Mirror weights +X → −X', action: () => app.mirrorWeights() },
+            { label: 'Normalize (max 4 bones)', hint: 'as exported', action: () => app.normalizeWeights() },
+            { label: 'Clear this group', action: () => app.clearWeightGroup() },
+          ]),
+          this.groupPicker(),
         ),
       );
     } else if (mode === 'edit' || mode === 'uv') {
@@ -379,6 +438,28 @@ export class UI {
     }
   }
 
+  private rigItems(): MenuItem[] {
+    const app = this.app;
+    const arms = app.armatures();
+    const items: MenuItem[] = [{ label: 'Add armature', action: () => app.addArmature() }];
+    if (arms.length) {
+      items.push({ separator: true, label: '' });
+      for (const a of arms.slice(0, 6)) {
+        items.push({ label: `Bind to ${a.name}`, hint: 'automatic weights', action: () => app.bindToArmature(true, a.id) });
+        items.push({ label: `Bind to ${a.name}`, hint: 'empty groups', action: () => app.bindToArmature(false, a.id) });
+      }
+      items.push({ label: 'Unbind selected', action: () => app.unbind() });
+    }
+    return items;
+  }
+
+  /** Rail button showing the painted vertex group; opens a list of bones. */
+  private groupPicker() {
+    const app = this.app;
+    const b: HTMLButtonElement = h('button', { class: 'tool more', tip: `Painting: ${app.weightGroup ?? 'no group'}`, onclick: () => showMenu(b, app.weightGroups().map((g) => ({ label: g, checked: g === app.weightGroup, action: () => { app.setWeightGroup(g); } })), 'Bone / group') }, icon('bone', 24));
+    return b;
+  }
+
   private uvRail(): HTMLElement[] {
     const app = this.app, uv = this.uv;
     return [
@@ -429,16 +510,17 @@ export class UI {
       h('button', { class: `chip${on ? ' on' : ''}`, tip: name, onclick: action }, icon(iconName, 20));
     const sep = () => h('span', { class: 'chip-sep' });
     const edit = app.isEditLike;
+    const armEdit = edit && !!app.active?.armature;
     const items: Node[] = [];
     if (edit) {
       items.push(
-        chip('vert', app.selectMode === 'vert', () => app.setSelectMode('vert'), 'Vertex select (1)'),
-        chip('edge', app.selectMode === 'edge', () => app.setSelectMode('edge'), 'Edge select (2)'),
-        chip('face', app.selectMode === 'face', () => app.setSelectMode('face'), 'Face select (3)'),
+        chip('vert', app.selectMode === 'vert', () => app.setSelectMode('vert'), armEdit ? 'Joint select (1)' : 'Vertex select (1)'),
+        chip('edge', app.selectMode === 'edge', () => app.setSelectMode('edge'), armEdit ? 'Bone select (2)' : 'Edge select (2)'),
+        armEdit ? null as any : chip('face', app.selectMode === 'face', () => app.setSelectMode('face'), 'Face select (3)'),
         sep(),
       );
     }
-    if (app.mode !== 'sculpt') {
+    if (app.mode !== 'sculpt' && app.mode !== 'weight') {
       const ops: [SelOp, string, string][] = [['set', 'selSet', 'Tap replaces selection'], ['add', 'selAdd', 'Tap adds / toggles'], ['sub', 'selSub', 'Tap removes from selection']];
       for (const [id, ic, t] of ops) items.push(chip(ic, app.selOp === id, () => { app.selOp = id; this.renderEditBar(); }, t));
       items.push(chip('selAll', false, () => app.selectAll(), 'Select all / none (A)'));
@@ -449,7 +531,7 @@ export class UI {
       const gBtn: HTMLButtonElement = h('button', { class: `chip${gz !== 'none' ? ' on' : ''}`, tip: `Gizmo: ${gName[gz]}`, onclick: () => showMenu(gBtn, (['move', 'rotate', 'scale', 'none'] as const).map((g) => ({ label: gName[g], checked: gz === g, action: () => { app.settings.gizmo = g; this.renderEditBar(); app.vp.requestRender(); } })), 'Gizmo') }, icon(gIcon[gz], 20));
       items.push(gBtn);
     }
-    if (edit) {
+    if (edit && !armEdit) {
       items.push(
         chip('xray', app.vp.settings.xray, () => { app.vp.settings.xray = !app.vp.settings.xray; app.changed(); this.renderEditBar(); }, 'X-ray: see & select through'),
         chip('mirror', app.settings.mirrorX, () => { app.settings.mirrorX = !app.settings.mirrorX; this.renderEditBar(); }, 'Mirror edits across X'),
@@ -463,17 +545,23 @@ export class UI {
       ], 'Proportional') }, icon('proportional', 20));
       items.push(pBtn);
     }
-    if (app.mode !== 'sculpt') items.push(chip('snap', app.settings.snap.enabled, () => { app.settings.snap.enabled = !app.settings.snap.enabled; this.renderEditBar(); }, 'Snap to increments'));
+    if (app.mode !== 'sculpt' && app.mode !== 'weight') items.push(chip('snap', app.settings.snap.enabled, () => { app.settings.snap.enabled = !app.settings.snap.enabled; this.renderEditBar(); }, 'Snap to increments'));
     const tap = app.gestures.settings.touchAsPen;
     items.push(chip('touchPen', tap, () => { app.gestures.settings.touchAsPen = !tap; this.saveInputSettings(); this.renderEditBar(); this.renderStatus(); },
       tap ? 'Touch acts like a pen: ON — 1 finger edits, 2 fingers navigate' : 'Touch acts like a pen: OFF — 1 finger navigates'));
+    if (app.mode === 'weight') {
+      const w = app.wbrush;
+      items.push(this.slider('radius', 'Brush radius', w.radius, 5, 300, 1, (v) => { w.radius = v; app.vp.requestRender(); }, 'px'));
+      items.push(this.slider('strength', 'Brush strength', w.strength, 0.01, 1, 0.01, (v) => { w.strength = v; }));
+      if (w.tool === 'draw') items.push(this.slider('modeWeight', 'Weight value', w.weight, 0, 1, 0.01, (v) => { w.weight = v; }));
+    }
     if (app.mode === 'sculpt') {
       const b = app.brush;
       items.push(this.slider('radius', 'Brush radius', b.radius, 5, 300, 1, (v) => { b.radius = v; app.vp.requestRender(); }, 'px'));
       items.push(this.slider('strength', 'Brush strength', b.strength, 0.01, 1, 0.01, (v) => { b.strength = v; app.vp.requestRender(); }));
       if (b.dyntopo) items.push(this.slider('detail', 'Detail size (smaller = finer)', b.detail, 2, 40, 1, (v) => { b.detail = v; }, 'px'));
     }
-    this.editBar.append(...items);
+    this.editBar.append(...items.filter(Boolean));
   }
 
   private slider(iconName: string, name: string, value: number, min: number, max: number, step: number, set: (v: number) => void, unit = '') {
@@ -549,7 +637,9 @@ export class UI {
     clear(this.statusEl);
     const a = app.active;
     let stats = '';
-    if (a && (app.isEditLike || app.mode === 'sculpt')) {
+    if (a?.armature && app.mode !== 'object') {
+      stats = `${a.armature.bones.length} bones` + (app.mode === 'pose' ? `  sel ${a.armature.selected.length}` : `  joints ${a.mesh.selV.size}/${a.mesh.verts.length}`);
+    } else if (a && (app.isEditLike || app.mode === 'sculpt' || app.mode === 'weight')) {
       const s = a.mesh.stats();
       stats = app.isEditLike ? `V ${a.mesh.selV.size}/${s.verts}  E ${a.mesh.selE.size}/${s.edges}  F ${a.mesh.selF.size}/${s.faces}  Tris ${s.tris}` : `V ${s.verts}  F ${s.faces}  Tris ${s.tris}`;
     } else {
@@ -570,6 +660,9 @@ export class UI {
       if (app.mode === 'sculpt') return 'Touch = pen: 1 finger sculpts anywhere · 2 fingers pan/zoom · orbit with the nav buttons';
       return 'Touch = pen: tap select · drag empty = box select · drag element = move · 2 fingers pan/zoom · orbit with the nav buttons';
     }
+    if (app.mode === 'weight') return `Painting ${app.weightGroup ?? '(no group)'} · blue 0 → red 1 · ${pen ? 'pen paints, fingers navigate' : 'drag on mesh to paint · drag off mesh to orbit'} · Ctrl inverts add/subtract`;
+    if (app.mode === 'pose') return pen ? 'Pen: tap a bone to select, drag a bone to rotate it · fingers navigate' : 'Tap a bone to select · drag a bone to rotate it · R/G/S + X/Y/Z for exact moves';
+    if (app.isEditLike && app.active?.armature) return 'Tap joints or bones · drag a joint to move it · Extrude (E) grows a child bone from the selected joint';
     if (app.mode === 'sculpt' && app.brush.dyntopo) return (pen ? 'Pen sculpts' : 'Drag on mesh to sculpt') + ' · dynamic topology adds detail under the brush (Detail slider)';
     if (app.mode === 'sculpt') return pen ? 'Pen sculpts (pressure) · fingers navigate' : 'Drag on mesh to sculpt · drag off mesh to orbit · 2 fingers pan/zoom';
     if (app.tool === 'loopcut') return 'Tap an edge to insert an edge loop';
@@ -629,13 +722,14 @@ export class UI {
       onclick: (e: MouseEvent) => { if (app.mode !== 'object') app.setMode('object'); app.selectObject(o, e.shiftKey || app.selOp === 'add' ? 'add' : 'set'); },
     },
       h('span', { class: 'oname' }, o.name),
-      h('span', { class: 'ostat' }, `${o.mesh.faces.length}f`),
+      h('span', { class: 'ostat' }, o.armature ? `${o.armature.bones.length}b` : `${o.mesh.faces.length}f`),
       h('button', { class: 'iconbtn small', tip: o.visible ? 'Hide' : 'Show', onclick: (e: Event) => { e.stopPropagation(); app.record('Visibility'); o.visible = !o.visible; app.changed(); } }, icon(o.visible ? 'eye' : 'eyeoff', 18)),
     )));
     this.panel.append(sec('Scene', list));
 
     const a = app.active;
     if (app.mode === 'sculpt') this.panel.append(this.brushSection());
+    if (app.mode === 'weight' && a) this.panel.append(this.weightSection());
     if (a) {
       // object properties
       const name = h('input', { class: 'text', value: a.name }) as HTMLInputElement;
@@ -657,6 +751,11 @@ export class UI {
           h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: a.smooth, onchange: (e: Event) => app.setShading((e.target as HTMLInputElement).checked) }), 'Smooth shading'),
         ),
       ));
+      if (a.armature) {
+        this.panel.append(this.bonesSection(a));
+        this.panel.scrollTop = this.panelScroll;
+        return;
+      }
       // modifiers
       const mods = h('div', {}, a.modifiers.map((md) => {
         const head = h('div', { class: 'modhead' },
@@ -670,6 +769,12 @@ export class UI {
           body = h('div', { class: 'row seg' }, ['X', 'Y', 'Z'].map((l, i) => h('button', { class: `segbtn${md.axis === i ? ' on' : ''}`, onclick: () => { app.record('Mirror axis'); md.axis = i as 0 | 1 | 2; app.changed(); } }, l)));
         } else if (md.type === 'subsurf') {
           body = h('div', { class: 'row seg' }, h('span', { class: 'vlabel' }, 'Levels'), [1, 2, 3].map((l) => h('button', { class: `segbtn${md.levels === l ? ' on' : ''}`, onclick: () => { app.record('Subdiv levels'); md.levels = l; app.changed(); } }, String(l))));
+        } else if (md.type === 'armature') {
+          const arms = app.armatures();
+          body = h('div', {},
+            h('div', { class: 'row seg' }, h('span', { class: 'vlabel' }, 'Rig'), arms.length ? arms.map((ar) => h('button', { class: `segbtn${md.target === ar.id ? ' on' : ''}`, onclick: () => { app.record('Armature target'); md.target = ar.id; app.changed(); } }, ar.name)) : h('span', { class: 'note' }, 'no armature in scene')),
+            h('div', { class: 'note' }, `${a.mesh.groups.length} vertex group${a.mesh.groups.length === 1 ? '' : 's'} · deforms in Object & Pose mode`),
+          );
         } else body = this.heavyModifierBody(md);
         return h('div', { class: 'mod' }, head, body);
       }));
@@ -678,6 +783,7 @@ export class UI {
         { label: 'Subdivision surface', action: () => app.addModifier('subsurf') },
         { label: 'Remesh', hint: 'voxel / blocks / isotropic', action: () => app.addModifier('remesh') },
         { label: 'Decimate', hint: 'collapse / un-subdiv / planar', action: () => app.addModifier('decimate') },
+        { label: 'Armature', hint: 'bind via Rig menu', action: () => app.addModifier('armature') },
       ], 'Add modifier') }, '+ Add modifier');
       const evalFaces = app.vp.view(a.id)?.evalMesh?.faces.length;
       const resultRow = a.modifiers.some((m) => m.enabled) && evalFaces !== undefined
@@ -758,6 +864,57 @@ export class UI {
       mode === 'unsubdivide' ? seg('Levels', [[1, '1'], [2, '2'], [3, '3']], md.iterations ?? 1, (v) => (md.iterations = v)) : null,
       mode === 'planar' ? num('Angle°', md.angle ?? 5, (x) => (md.angle = Math.min(90, x)), 1.5) : null,
       mode === 'planar' ? check('Stop at seams', md.delimitSeams, (x) => (md.delimitSeams = x)) : null,
+    );
+  }
+
+  /** Bone list + active bone settings for an armature object. */
+  private bonesSection(o: SceneObject) {
+    const app = this.app, arm = o.armature!;
+    const depth = (i: number) => { let d = 0; for (let p = arm.bones[i].parent; p >= 0 && d < 32; p = arm.bones[p].parent) d++; return d; };
+    const order: number[] = [];
+    const visit = (i: number) => { order.push(i); arm.bones.forEach((b, k) => { if (b.parent === i) visit(k); }); };
+    arm.bones.forEach((b, i) => { if (b.parent < 0 || b.parent >= arm.bones.length) visit(i); });
+    const editing = app.mode === 'edit' && app.editObj === o;
+    const isSel = (i: number) => editing ? o.mesh.selV.has(arm.bones[i].head) && o.mesh.selV.has(arm.bones[i].tail) : app.mode === 'pose' && arm.selected.includes(i);
+    const list = h('div', { class: 'outliner' }, order.map((i) => h('div', {
+      class: `orow${isSel(i) ? ' sel' : ''}${arm.active === i ? ' act' : ''}`,
+      style: `padding-left:${8 + depth(i) * 12}px`,
+      onclick: () => app.pickBoneFromList(o, i),
+    }, h('span', { class: 'oname' }, arm.bones[i].name), arm.bones[i].deform ? null : h('span', { class: 'ostat' }, 'no deform'))));
+    const out = h('section', { class: 'psec' }, h('h3', {}, `Bones · ${arm.bones.length}`), list);
+    const i = arm.active;
+    const b = arm.bones[i];
+    if (!b) { out.append(h('div', { class: 'note' }, 'Tap a bone to edit its name, parent and roll.')); return out; }
+    const name = h('input', { class: 'text', value: b.name }) as HTMLInputElement;
+    name.addEventListener('change', () => app.renameBone(o, i, name.value));
+    const parent = h('select', { class: 'text' }, h('option', { value: '-1' }, '(none)'), arm.bones.map((x, k) => (k === i ? null : h('option', { value: String(k), selected: b.parent === k }, x.name)))) as HTMLSelectElement;
+    parent.addEventListener('change', () => app.setBoneParent(o, i, +parent.value));
+    const roll = h('input', { class: 'num', type: 'text', inputmode: 'decimal', value: fmt(deg(b.roll), 1) }) as HTMLInputElement;
+    roll.addEventListener('change', () => { const v = parseFloat(roll.value); if (isFinite(v)) app.setBoneProp(o, i, 'Bone roll', (x) => (x.roll = rad(v))); });
+    out.append(
+      h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Name'), name),
+      h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Parent'), parent),
+      h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Roll°'), roll),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: b.deform, onchange: (e: Event) => app.setBoneProp(o, i, 'Bone deform', (x) => (x.deform = (e.target as HTMLInputElement).checked)) }), 'Deforms the mesh'),
+    );
+    if (app.mode === 'pose') out.append(h('div', { class: 'row' }, h('button', { class: 'tiny', onclick: () => app.clearPose() }, 'Clear selected'), h('button', { class: 'tiny', onclick: () => app.clearPose(true) }, 'Clear all')));
+    return out;
+  }
+
+  /** Weight mode: which bone group to paint, plus brush details. */
+  private weightSection() {
+    const app = this.app, w = app.wbrush;
+    const groups = app.weightGroups();
+    const list = h('div', { class: 'outliner' }, groups.length ? groups.map((g) => h('div', { class: `orow${g === app.weightGroup ? ' sel act' : ''}`, onclick: () => app.setWeightGroup(g) }, h('span', { class: 'oname' }, g))) : h('div', { class: 'note' }, 'Bind this mesh to an armature (Object mode → Rig) to get one group per bone.'));
+    const check = (label: string, v: boolean, set: (x: boolean) => void) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: v, onchange: (e: Event) => { set((e.target as HTMLInputElement).checked); this.renderRail(); } }), label);
+    return h('section', { class: 'psec' }, h('h3', {}, 'Weights'), list,
+      h('div', { class: 'row seg' }, h('span', { class: 'vlabel' }, 'Falloff'), (['smooth', 'sphere', 'sharp', 'linear'] as const).map((f) => h('button', { class: `segbtn${w.falloff === f ? ' on' : ''}`, onclick: () => { w.falloff = f; this.renderPanel(); } }, f))),
+      check('Pen pressure → strength', w.pressureStrength, (x) => (w.pressureStrength = x)),
+      check('X symmetry (paints the .L / .R partner)', w.symmetryX, (x) => (w.symmetryX = x)),
+      h('div', { class: 'row' },
+        h('button', { class: 'tiny', onclick: () => app.autoWeightsActive() }, 'Automatic weights'),
+        h('button', { class: 'tiny', onclick: () => app.normalizeWeights() }, 'Normalize')),
+      h('div', { class: 'note' }, 'The exported skin keeps the 4 strongest bones per vertex, normalised.'),
     );
   }
 
@@ -875,6 +1032,8 @@ export class UI {
       ['Proportional', 'Chip or O toggles; while moving use −/+ in the bar, the mouse wheel or [ ]'],
       ['Knife', 'Drag a straight line across faces; repeat for more cuts'],
       ['Remesh / decimate', 'Modifiers in the panel, or one-shot from the globe menu (Object & Sculpt rail, Edit → Mesh tools)'],
+      ['Rigging', 'Add → Armature · Edit mode: select a joint, Extrude (E) grows a bone · select mesh + armature, Rig → Bind'],
+      ['Pose / weights', 'Pose mode: drag a bone to rotate it · Weight mode paints the chosen bone (blue 0 → red 1)'],
       ['Keys', 'Tab edit · G/R/S + X/Y/Z · E extrude · I inset · Ctrl+B bevel · K knife · O proportional · Ctrl+R loop cut · M merge · F fill · J connect · L linked · U unwrap · A all · X delete · Shift+D duplicate · Ctrl+Z undo'],
       ['Mouse', 'Left select/box · Middle orbit · Shift+Middle / Right pan · Wheel zoom'],
     ];
