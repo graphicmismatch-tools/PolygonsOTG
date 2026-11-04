@@ -142,6 +142,11 @@ const ICONS: Record<string, IconDef> = {
   autoKey: { d: 'M12 3a9 9 0 100 18 9 9 0 000-18z', solid: dot(12, 12, 4.5) },
   ik: { d: 'M4 20l6-8 4 6 6-12', solid: dot(20, 6, 2) },
   film: { d: 'M3 5h18v14H3zM7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4' },
+  // uv
+  pin: { d: 'M9 3h6l-1 6 4 4H6l4-4zM12 13v8', fill: 'M9 3h6l-1 6 4 4H6l4-4z' },
+  unpin: { d: 'M9 3h6l-1 6 4 4H6l4-4zM12 13v8M4 4l16 16' },
+  liveUnwrap: { d: 'M4 6h7v7H4zM13 11h7v7h-7zM11 9.5c3 0 4.5-1 5-3M16 6.5l1 3-3 .5', fill: 'M13 11h7v7h-7z' },
+  stretch: { d: 'M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4', bold: 'M10 9v6M14 9v6' },
 };
 
 export function icon(name: string, size = 22): SVGSVGElement {

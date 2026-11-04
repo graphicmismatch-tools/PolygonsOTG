@@ -33,6 +33,8 @@ export interface Settings {
   panelOpen: boolean;
   leftHanded: boolean;
   proportional: { enabled: boolean; falloff: Falloff; radius: number };
+  /** Re-solve UV islands while pins move or seams change. */
+  liveUnwrap: boolean;
 }
 
 export interface ParamDef { name: string; value: number; min: number; max: number; step: number; drag: number; int?: boolean }
@@ -75,6 +77,7 @@ export class App {
     panelOpen: false,
     leftHanded: false,
     proportional: { enabled: false, falloff: 'smooth', radius: 1 },
+    liveUnwrap: false,
   };
   hover: { x: number; y: number; type: PInfo['type'] } | null = null;
   private box: { x0: number; y0: number; x1: number; y1: number } | null = null;
@@ -1152,11 +1155,11 @@ export class App {
         while (a.mesh.vw.length < off) a.mesh.vw.push([]);
         for (let i = 0; i < m.verts.length; i++) a.mesh.vw[off + i] = m.weightsOf(i).map(([g, w]) => [gmap[g], w]);
       }
-      for (const f of m.faces) a.mesh.faces.push({ v: f.v.map((x) => x + off), uv: f.uv.map((u) => [u[0], u[1]]) });
+      for (const f of m.faces) a.mesh.faces.push({ v: f.v.map((x) => x + off), uv: f.uv.map((u) => [u[0], u[1]]), ...(f.pin ? { pin: f.pin.slice() } : {}) });
       for (const [x, y] of m.looseEdges) a.mesh.looseEdges.push([x + off, y + off]);
       for (const k of m.seams) { const [x, y] = parseKey(k); a.mesh.seams.add(ekey(x + off, y + off)); }
       // flip faces if the joined object's transform mirrors geometry
-      if (M.determinant() < 0) for (let i = a.mesh.faces.length - m.faces.length; i < a.mesh.faces.length; i++) { a.mesh.faces[i].v.reverse(); a.mesh.faces[i].uv.reverse(); }
+      if (M.determinant() < 0) for (let i = a.mesh.faces.length - m.faces.length; i < a.mesh.faces.length; i++) { a.mesh.faces[i].v.reverse(); a.mesh.faces[i].uv.reverse(); a.mesh.faces[i].pin?.reverse(); }
       this.scene.remove(o.id);
     }
     a.mesh.changed();
@@ -1551,7 +1554,23 @@ export class App {
     this.emit('mode');
     this.changed();
   }
-  markSeam(on: boolean) { this.editOp(on ? 'Mark Seam' : 'Clear Seam', (m) => { if (!m.selE.size) { this.status('Select edges'); return false; } ops.markSeams(m, on); }); }
+  markSeam(on: boolean) {
+    let touched: number[] = [];
+    const ok = this.editOp(on ? 'Mark Seam' : 'Clear Seam', (m) => {
+      if (!m.selE.size) { this.status('Select edges'); return false; }
+      touched = [...new Set([...m.selE].flatMap((k) => m.edge(k)?.faces ?? []))];
+      ops.markSeams(m, on);
+    });
+    if (ok && this.settings.liveUnwrap && touched.length) {
+      const m = this.editObj!.mesh;
+      const r = uvOps.liveUnwrap(m, uvOps.chartsOf(m, touched));
+      this.changed();
+      if (r.solved) this.status(`Live unwrap: ${r.solved} island${r.solved > 1 ? 's' : ''} updated${r.skipped ? ` · ${r.skipped} skipped (closed or not unwrapped yet)` : ''}`);
+      else if (r.skipped) this.status('Live unwrap: nothing to update — the part is closed or has no UVs yet (Unwrap once first)', 4000);
+    }
+  }
+
+  setLiveUnwrap(on: boolean) { this.settings.liveUnwrap = on; this.emit('mode'); this.uvRedraw(); this.status(on ? 'Live unwrap on: moving pins or changing seams re-solves the islands' : 'Live unwrap off'); }
   snapCenterX() { this.editOp('Snap to X=0', (m) => ops.snapToCenterX(m)); }
 
   /* ================================================================ rigging */
@@ -2109,8 +2128,9 @@ export class App {
   uvUnwrap() {
     const a = this.editObj;
     if (!a) return;
-    let res = { charts: 0, fallback: 0 };
+    let res = { charts: 0, fallback: 0, pinned: 0 };
     this.editOp('Unwrap', (m) => { res = uvOps.unwrapLSCM(m); });
+    if (res.pinned) { this.status(`Unwrapped ${res.charts} island${res.charts > 1 ? 's' : ''} · ${res.pinned} kept in place by pins`, 4000); return; }
     this.status(res.fallback ? `Unwrapped ${res.charts} islands (${res.fallback} closed part${res.fallback > 1 ? 's' : ''} without seams used smart projection)` : `Unwrapped ${res.charts} island${res.charts > 1 ? 's' : ''}`, 4000);
   }
   uvSmart() { let n = 0; this.editOp('Smart UV Project', (m) => { n = uvOps.smartProject(m); }); this.status(`${n} islands`); }

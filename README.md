@@ -33,6 +33,8 @@ It runs as an Android app (Capacitor) and, from the same code, in any modern bro
 - **Split view:** the 3D edit view next to a 2D UV editor.
 - **Unwrapping:** seam-based LSCM conformal unwrap, smart UV project, and projection from view, cube, cylinder or sphere, plus island packing.
 - **UV editing:** move, rotate and scale (with axis lock), flip, rotate 90°, weld, align, fit to 0–1, and island selection.
+- **Pins & live unwrap:** pin UV points (red squares). Unwrap then solves each island around its pins and leaves it in place instead of repacking it: 2+ pins shape the island, 1 pin anchors it. With Live unwrap on, dragging pinned points re-solves their island every frame, and marking or clearing seams in Edit mode re-unwraps the affected islands where they are.
+- **Stretch display:** colours UV faces by distortion, blue (none) to red. Angle shows shape distortion (how far each face is from a conformal map); Area shows faces that got more or less than their share of the texture. The mean is shown with a legend.
 - **Textures:** a checker preview and image textures.
 - **UV layout export (texture guide):** Menu → Export → UV layout, or the image menu in UV mode. It saves the 0–1 UV square as PNG (512 to 4K) or SVG, so you can paint a texture over it in any image editor. A live preview shows the options: transparent, white or black background; black, white or grey lines in three widths; faces filled grey or one colour per island; seams in red; an optional 8×8 grid. It warns when a layout makes a poor guide: no UVs yet, faces outside the square, overlapping islands or faces with no UV area. It also notes Mirror modifiers that share UVs and how much of the square the islands use.
 

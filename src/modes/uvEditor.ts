@@ -1,7 +1,9 @@
 import { App } from '../app';
 import { Gestures, PInfo, ToolHandler } from '../input';
 import { V2 } from '../core/vec';
-import { uvIslands } from '../core/uv';
+import { uvIslands, chartsOf, liveUnwrap, uvStretch, StretchMode } from '../core/uv';
+import { isPinned } from '../core/mesh';
+import { weightColor } from '../core/skin';
 
 type UVKind = 'move' | 'rotate' | 'scale';
 
@@ -31,6 +33,11 @@ export class UVEditor {
   /** Theme colours for the 2D canvas. */
   colors = { uvBg: '#1f2024', uvPaper: '#2c2d33', faceTint: 'rgba(160,160,170,0.10)', corner: '#e8e8ec' };
   private userMoved = false;
+  /** Colour faces by UV distortion. */
+  stretch: 'off' | StretchMode = 'off';
+  private stretchCache: { key: string; face: Float32Array; mean: number } | null = null;
+  /** Live unwrap during a transform: charts re-solved around their pins, and their UVs for cancel. */
+  private live: { charts: number[][]; backup: Map<number, V2[]>; pending: boolean } | null = null;
 
   constructor(private canvas: HTMLCanvasElement, private container: HTMLElement, private app: App) {
     this.ctx = canvas.getContext('2d')!;
@@ -279,6 +286,16 @@ export class UVEditor {
       orig.set(k, [u[0], u[1]]);
       x0 = Math.min(x0, u[0]); x1 = Math.max(x1, u[0]); y0 = Math.min(y0, u[1]); y1 = Math.max(y1, u[1]);
     }
+    this.live = null;
+    if (this.app.settings.liveUnwrap) {
+      const pinnedFaces = [...this.sel].map(pk).filter(([f, c]) => m.faces[f] && isPinned(m.faces[f], c)).map(([f]) => f);
+      if (pinnedFaces.length) {
+        const charts = chartsOf(m, pinnedFaces);
+        const backup = new Map<number, V2[]>();
+        for (const c of charts) for (const f of c) backup.set(f, m.faces[f].uv.map((u) => [u[0], u[1]] as V2));
+        this.live = { charts, backup, pending: false };
+      }
+    }
     const id = kind === 'scale' ? [1, 1] : [0, 0];
     this.modal = { kind, orig, pivot: [(x0 + x1) / 2, (y0 + y1) / 2], acc: id.slice(), cur: id.slice(), axis: null, dragStart: null, lastA: 0, unwrap: 0 };
     this.onModal();
@@ -354,6 +371,17 @@ export class UVEditor {
       m.faces[f].uv[c] = [u, v];
     }
     m.uvChanged();
+    // live unwrap: re-solve the pinned islands at most once per frame
+    if (this.live && !this.live.pending) {
+      this.live.pending = true;
+      requestAnimationFrame(() => {
+        if (!this.live || !this.modal) return;
+        this.live.pending = false;
+        liveUnwrap(m, this.live.charts);
+        this.app.redraw();
+        this.redraw();
+      });
+    }
     this.app.redraw();
     this.onModal();
   }
@@ -369,6 +397,7 @@ export class UVEditor {
 
   confirm() {
     if (!this.modal) return;
+    if (this.live) { liveUnwrap(this.obj!.mesh, this.live.charts); this.live = null; }
     this.modal = null;
     this.app.changed();
     this.onModal();
@@ -379,6 +408,7 @@ export class UVEditor {
     const md = this.modal;
     if (!md) return;
     const m = this.obj!.mesh;
+    if (this.live) { for (const [f, uv] of this.live.backup) if (m.faces[f]) m.faces[f].uv = uv; this.live = null; }
     for (const [k, o] of md.orig) { const [f, c] = pk(k); if (m.faces[f]) m.faces[f].uv[c] = [o[0], o[1]]; }
     m.uvChanged();
     this.modal = null;
@@ -416,6 +446,55 @@ export class UVEditor {
     }
     m.uvChanged();
     this.app.changed();
+  }
+
+  /** Pin (or unpin) the selected UV corners. */
+  pinSelected(on: boolean) {
+    const m = this.obj?.mesh;
+    if (!m) return;
+    this.validateSel();
+    if (!this.sel.size) { this.app.status(on ? 'Select UV points to pin' : 'Select UV points to unpin'); return; }
+    this.app.record(on ? 'Pin UVs' : 'Unpin UVs');
+    let n = 0;
+    for (const k of this.sel) {
+      const [fi, c] = pk(k);
+      const f = m.faces[fi];
+      if (!f) continue;
+      if (!f.pin || f.pin.length !== f.v.length) f.pin = f.v.map(() => false);
+      if (f.pin[c] !== on) n++;
+      f.pin[c] = on;
+      if (!f.pin.some(Boolean)) delete f.pin;
+    }
+    m.uvChanged();
+    this.app.changed();
+    this.app.status(on ? `Pinned ${this.pinnedPoints(m)} UV points · Unwrap now keeps them in place` : `Unpinned · ${this.pinnedPoints(m)} pinned left`);
+    void n;
+  }
+
+  /** Distinct pinned UV positions (counting sticky corners once). */
+  pinnedPoints(m = this.obj?.mesh): number {
+    if (!m) return 0;
+    const set = new Set<string>();
+    m.faces.forEach((f) => f.uv.forEach((u, c) => { if (isPinned(f, c)) set.add(`${f.v[c]}|${u[0].toFixed(5)}|${u[1].toFixed(5)}`); }));
+    return set.size;
+  }
+
+  /** Select every pinned corner. */
+  selectPinned() {
+    const m = this.obj?.mesh;
+    if (!m) return;
+    this.validateSel();
+    this.sel.clear();
+    for (const fi of this.faces()) m.faces[fi].uv.forEach((_, c) => { if (isPinned(m.faces[fi], c)) this.sel.add(ck(fi, c)); });
+    this.redraw();
+    this.onModal();
+  }
+
+  private stretchValues(faces: number[]) {
+    const m = this.obj!.mesh;
+    const key = `${this.stretch}|${m.version}|${m.uvId}|${faces.length}|${m.selF.size}`;
+    if (this.stretchCache?.key !== key) this.stretchCache = { key, ...uvStretch(m, faces, this.stretch as StretchMode) };
+    return this.stretchCache;
   }
 
   /* ---------------------------------------------------------------- drawing */
@@ -466,6 +545,7 @@ export class UVEditor {
 
     const m = o.mesh;
     const faces = this.faces();
+    const st = this.stretch !== 'off' ? this.stretchValues(faces) : null;
     // faces
     ctx.lineWidth = 1.2;
     for (const fi of faces) {
@@ -474,8 +554,16 @@ export class UVEditor {
       f.uv.forEach((u, i) => { const s = this.toScreen(u); if (i) ctx.lineTo(s.x, s.y); else ctx.moveTo(s.x, s.y); });
       ctx.closePath();
       const allSel = f.uv.every((_, c) => this.sel.has(ck(fi, c)));
-      ctx.fillStyle = allSel ? 'rgba(255,154,31,0.28)' : this.colors.faceTint;
-      ctx.fill();
+      if (st) {
+        // stretch: blue (none) → red (strong); the curve spreads the low end where most faces live
+        const c = weightColor(Math.min(1, Math.sqrt(st.face[fi] * 2)));
+        ctx.fillStyle = `rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},0.8)`;
+        ctx.fill();
+        if (allSel) { ctx.fillStyle = 'rgba(255,154,31,0.3)'; ctx.fill(); }
+      } else {
+        ctx.fillStyle = allSel ? 'rgba(255,154,31,0.28)' : this.colors.faceTint;
+        ctx.fill();
+      }
       ctx.strokeStyle = 'rgba(20,20,24,0.9)';
       ctx.stroke();
     }
@@ -494,16 +582,26 @@ export class UVEditor {
         ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
       }
     }
-    // corners
+    // corners (pins drawn bigger, red, on top)
     const r = matchMedia('(pointer: coarse)').matches ? 3.5 : 2.5;
+    const pins: { x: number; y: number; sel: boolean }[] = [];
     for (const fi of faces) {
       const f = m.faces[fi];
       f.uv.forEach((u, c) => {
         const s = this.toScreen(u);
         const sel = this.sel.has(ck(fi, c));
+        if (isPinned(f, c)) { pins.push({ x: s.x, y: s.y, sel }); return; }
         ctx.fillStyle = sel ? '#ffa033' : this.colors.corner;
         ctx.fillRect(s.x - r, s.y - r, r * 2, r * 2);
       });
+    }
+    const pr = r + 2;
+    for (const p of pins) {
+      ctx.fillStyle = p.sel ? '#ffa033' : '#ff3b3b';
+      ctx.fillRect(p.x - pr, p.y - pr, pr * 2, pr * 2);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(p.x - pr + 0.5, p.y - pr + 0.5, pr * 2 - 1, pr * 2 - 1);
     }
     if (this.modal) {
       const p = this.toScreen(this.modal.pivot);
@@ -519,7 +617,18 @@ export class UVEditor {
     }
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
     ctx.font = "11px 'JetBrains Mono', 'Roboto Mono', 'Droid Sans Mono', ui-monospace, monospace";
-    ctx.fillText(m.selF.size ? `${faces.length} selected faces` : 'All faces (select faces in 3D to filter)', 10, this.height - 10);
+    const info = m.selF.size ? `${faces.length} selected faces` : 'All faces (select faces in 3D to filter)';
+    const live = this.app.settings.liveUnwrap ? ' · live unwrap' : '';
+    ctx.fillText(info + live, 10, this.height - 10);
+    if (st) {
+      // legend
+      const w = 120, h = 8, x = this.width - w - 12, y = this.height - 22;
+      for (let i = 0; i < w; i++) { const c = weightColor(Math.min(1, Math.sqrt((i / w) * 2))); ctx.fillStyle = `rgb(${c.map((v) => Math.round(v * 255)).join(',')})`; ctx.fillRect(x + i, y, 1, h); }
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      ctx.textAlign = 'right';
+      ctx.fillText(`${this.stretch} stretch · mean ${(st.mean * 100).toFixed(1)}%`, this.width - 12, y - 4);
+      ctx.textAlign = 'left';
+    }
   }
 
 }

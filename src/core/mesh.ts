@@ -5,6 +5,8 @@ export interface Face {
   v: number[];
   /** Per-corner UV coordinates (same length as v). */
   uv: V2[];
+  /** Pinned UV corners (kept in place by unwrapping); absent = none pinned. */
+  pin?: boolean[];
 }
 
 export interface EdgeInfo {
@@ -16,6 +18,9 @@ export interface EdgeInfo {
 }
 
 export type SelectMode = 'vert' | 'edge' | 'face';
+
+/** Is a face corner's UV pinned? (Pins whose length no longer matches the face are stale and ignored.) */
+export const isPinned = (f: Face, c: number) => !!f.pin && f.pin.length === f.v.length && !!f.pin[c];
 
 export const ekey = (a: number, b: number) => (a < b ? `${a}_${b}` : `${b}_${a}`);
 export const parseKey = (k: string): [number, number] => {
@@ -226,13 +231,13 @@ export class Mesh {
     // collapse consecutive duplicate indices
     const faces: Face[] = [];
     for (const f of this.faces) {
-      const v: number[] = [], uv: V2[] = [];
+      const v: number[] = [], uv: V2[] = [], pin: boolean[] = [];
       for (let i = 0; i < f.v.length; i++) {
         if (v.length && v[v.length - 1] === f.v[i]) continue;
-        v.push(f.v[i]); uv.push(f.uv[i]);
+        v.push(f.v[i]); uv.push(f.uv[i]); pin.push(!!f.pin?.[i]);
       }
-      while (v.length > 1 && v[0] === v[v.length - 1]) { v.pop(); uv.pop(); }
-      if (new Set(v).size >= 3 && new Set(v).size === v.length) faces.push({ v, uv });
+      while (v.length > 1 && v[0] === v[v.length - 1]) { v.pop(); uv.pop(); pin.pop(); }
+      if (new Set(v).size >= 3 && new Set(v).size === v.length) faces.push(pin.some(Boolean) ? { v, uv, pin } : { v, uv });
     }
     // remove duplicated faces (same vertex set)
     const seen = new Set<string>();
@@ -293,7 +298,7 @@ export class Mesh {
   clone(): Mesh {
     const m = new Mesh();
     m.verts = this.verts.map((p) => [p[0], p[1], p[2]] as V3);
-    m.faces = this.faces.map((f) => ({ v: f.v.slice(), uv: f.uv.map((u) => [u[0], u[1]] as V2) }));
+    m.faces = this.faces.map((f) => (f.pin ? { v: f.v.slice(), uv: f.uv.map((u) => [u[0], u[1]] as V2), pin: f.pin.slice() } : { v: f.v.slice(), uv: f.uv.map((u) => [u[0], u[1]] as V2) }));
     m.looseEdges = this.looseEdges.map((e) => [e[0], e[1]] as [number, number]);
     m.seams = new Set(this.seams);
     m.selV = new Set(this.selV);
@@ -306,7 +311,7 @@ export class Mesh {
   toJSON(): MeshJSON {
     return {
       verts: this.verts.map((p) => [round(p[0]), round(p[1]), round(p[2])] as V3),
-      faces: this.faces.map((f) => ({ v: f.v.slice(), uv: f.uv.map((u) => [round(u[0]), round(u[1])] as V2) })),
+      faces: this.faces.map((f) => ({ v: f.v.slice(), uv: f.uv.map((u) => [round(u[0]), round(u[1])] as V2), ...(f.pin?.some(Boolean) ? { pin: f.pin.slice() } : {}) })),
       looseEdges: this.looseEdges.map((e) => [e[0], e[1]] as [number, number]),
       seams: [...this.seams],
       selV: [...this.selV],
@@ -319,7 +324,7 @@ export class Mesh {
   static fromJSON(j: MeshJSON): Mesh {
     const m = new Mesh();
     m.verts = j.verts.map((p) => [p[0], p[1], p[2]] as V3);
-    m.faces = j.faces.map((f) => ({ v: f.v.slice(), uv: (f.uv ?? f.v.map(() => [0, 0])).map((u) => [u[0], u[1]] as V2) }));
+    m.faces = j.faces.map((f) => ({ v: f.v.slice(), uv: (f.uv ?? f.v.map(() => [0, 0])).map((u) => [u[0], u[1]] as V2), ...(f.pin ? { pin: f.v.map((_, i) => !!f.pin![i]) } : {}) }));
     m.looseEdges = (j.looseEdges ?? []).map((e) => [e[0], e[1]] as [number, number]);
     m.seams = new Set(j.seams ?? []);
     m.selV = new Set(j.selV ?? []);

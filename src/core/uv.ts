@@ -1,4 +1,4 @@
-import { Mesh, ekey } from './mesh';
+import { Mesh, ekey, isPinned } from './mesh';
 import { V2, V3, avg3, basisFromNormal, cross, dot, normalize, polyArea, sub, len } from './vec';
 import { triangulateFace } from './ops';
 
@@ -53,11 +53,18 @@ function chartHasBoundary(m: Mesh, chart: number[]): boolean {
   return false;
 }
 
-/** Islands produced by an unwrap: face -> per-corner uv. */
-type Island = { faces: number[]; uv: Map<number, V2[]> };
+/** Islands produced by an unwrap: face -> per-corner uv. `fixed` islands are already placed (not packed). */
+type Island = { faces: number[]; uv: Map<number, V2[]>; fixed?: boolean };
+
+export interface ChartOptions {
+  /** respect pinned corners (2+ pins: solved around them; 1 pin: anchored there) */
+  pins?: boolean;
+  /** fit the result onto the chart's current UVs (rotation, scale, position) instead of leaving it for packing */
+  inPlace?: boolean;
+}
 
 /** Least Squares Conformal Map of one chart. Returns null if it fails. */
-export function lscmChart(m: Mesh, chart: number[]): Island | null {
+export function lscmChart(m: Mesh, chart: number[], opts: ChartOptions = {}): Island | null {
   // Local vertices are "wedges": face corners of the same mesh vertex that are
   // connected through non-seam edges inside the chart. Vertices on a seam get
   // one wedge per side, which is what actually cuts the surface open.
@@ -94,6 +101,23 @@ export function lscmChart(m: Mesh, chart: number[]): Island | null {
   for (const fi of chart) m.faces[fi].v.forEach((_, ci) => wedge(fi, ci));
   const n = verts.length;
   if (n < 3) return null;
+  // current UV per wedge (warm start / in-place fit) and pinned wedges
+  const curUV: V2[] = new Array(n);
+  const pinUV = new Map<number, V2>();
+  for (const fi of chart) {
+    const f = m.faces[fi];
+    f.v.forEach((_, ci) => {
+      const l = wedge(fi, ci);
+      if (!curUV[l]) curUV[l] = [f.uv[ci][0], f.uv[ci][1]];
+      if (opts.pins && isPinned(f, ci) && !pinUV.has(l)) pinUV.set(l, [f.uv[ci][0], f.uv[ci][1]]);
+    });
+  }
+  let pinSpan = 0;
+  if (pinUV.size >= 2) {
+    const ps = [...pinUV.values()];
+    for (const a of ps) for (const b of ps) pinSpan = Math.max(pinSpan, Math.hypot(a[0] - b[0], a[1] - b[1]));
+  }
+  const solvePinned = pinSpan > 1e-9;
   // triangles with local coords
   type Tri = { i: number[]; w: [number, number][] };
   const tris: Tri[] = [];
@@ -122,16 +146,16 @@ export function lscmChart(m: Mesh, chart: number[]): Island | null {
   }
   if (!tris.length) return null;
 
-  // pin two far-apart vertices
+  // pin two far-apart vertices (or use the user's pins)
   const P = verts.map((v) => m.verts[v]);
   let p0 = 0, p1 = 0, best = -1;
   // approx diameter: farthest from first, then farthest from that
   const far = (from: number) => { let bi = from, bd = -1; for (let i = 0; i < n; i++) { const d = len(sub(P[i], P[from])); if (d > bd) { bd = d; bi = i; } } return bi; };
   p0 = far(0); p1 = far(p0); best = len(sub(P[p0], P[p1]));
-  if (p0 === p1 || best < 1e-9) return null;
+  if (!solvePinned && (p0 === p1 || best < 1e-9)) return null;
 
   // unknown index map: 2 values (u,v) per free vertex
-  const pinned = new Map<number, V2>([[p0, [0, 0]], [p1, [best, 0]]]);
+  const pinned = solvePinned ? pinUV : new Map<number, V2>([[p0, [0, 0]], [p1, [best, 0]]]);
   const freeIdx = new Int32Array(n).fill(-1);
   let nf = 0;
   for (let i = 0; i < n; i++) if (!pinned.has(i)) freeIdx[i] = nf++;
@@ -167,9 +191,12 @@ export function lscmChart(m: Mesh, chart: number[]): Island | null {
   };
   const b = new Float64Array(N);
   for (const row of rows) for (let k = 0; k < row.idx.length; k++) b[row.idx[k]] += row.val[k] * row.rhs;
-  // initial guess: planar projection onto best-fit plane, scaled to pins
+  // initial guess: the current UVs when solving around pins (fast while dragging),
+  // else a planar projection onto the best-fit plane
   const x = new Float64Array(N);
-  {
+  if (solvePinned) {
+    for (let i = 0; i < n; i++) if (freeIdx[i] >= 0) { x[freeIdx[i] * 2] = curUV[i][0]; x[freeIdx[i] * 2 + 1] = curUV[i][1]; }
+  } else {
     const dir = normalize(sub(P[p1], P[p0]));
     let nrm: V3 = [0, 0, 0];
     for (const fi of chart) { const fn = m.faceNormal(fi); nrm = [nrm[0] + fn[0], nrm[1] + fn[1], nrm[2] + fn[2]]; }
@@ -207,17 +234,57 @@ export function lscmChart(m: Mesh, chart: number[]): Island | null {
     uvLocal[i] = pin ? [pin[0], pin[1]] : [x[freeIdx[i] * 2], x[freeIdx[i] * 2 + 1]];
     if (!isFinite(uvLocal[i][0]) || !isFinite(uvLocal[i][1])) return null;
   }
-  // un-mirror if the map is orientation reversing
-  let signed = 0;
-  for (const fi of chart) {
-    const f = m.faces[fi];
-    const pts = f.v.map((_, ci) => uvLocal[wedge(fi, ci)]);
-    for (let i = 0; i < pts.length; i++) { const a = pts[i], b2 = pts[(i + 1) % pts.length]; signed += a[0] * b2[1] - b2[0] * a[1]; }
+  let fixed = solvePinned;
+  if (!solvePinned) {
+    // un-mirror if the map is orientation reversing
+    let signed = 0;
+    for (const fi of chart) {
+      const f = m.faces[fi];
+      const pts = f.v.map((_, ci) => uvLocal[wedge(fi, ci)]);
+      for (let i = 0; i < pts.length; i++) { const a = pts[i], b2 = pts[(i + 1) % pts.length]; signed += a[0] * b2[1] - b2[0] * a[1]; }
+    }
+    if (signed < 0) for (const u of uvLocal) u[0] = -u[0];
+    // one pin, or re-unwrapping in place: fit onto the current UVs, then anchor the pin exactly
+    if (pinUV.size >= 1 || opts.inPlace) {
+      const fit = fitSimilarity(uvLocal, curUV);
+      if (fit) {
+        for (const u of uvLocal) { const x0 = u[0], y0 = u[1]; u[0] = fit.a * x0 - fit.b * y0 + fit.tx; u[1] = fit.b * x0 + fit.a * y0 + fit.ty; }
+        if (pinUV.size >= 1) {
+          const [l, target] = [...pinUV][0];
+          const dx = target[0] - uvLocal[l][0], dy = target[1] - uvLocal[l][1];
+          for (const u of uvLocal) { u[0] += dx; u[1] += dy; }
+        }
+        fixed = true;
+      }
+    }
   }
-  if (signed < 0) for (const u of uvLocal) u[0] = -u[0];
   const uv = new Map<number, V2[]>();
   for (const fi of chart) uv.set(fi, m.faces[fi].v.map((_, ci) => { const u = uvLocal[wedge(fi, ci)]; return [u[0], u[1]] as V2; }));
-  return { faces: chart, uv };
+  return { faces: chart, uv, fixed };
+}
+
+/**
+ * Least-squares similarity (rotation, uniform scale, translation) taking
+ * points `a` onto `b`, as z ↦ (a + ib)·z + t. Null when `b` is degenerate.
+ */
+function fitSimilarity(a: V2[], b: V2[]): { a: number; b: number; tx: number; ty: number } | null {
+  const n = a.length;
+  let ax = 0, ay = 0, bx = 0, by = 0;
+  for (let i = 0; i < n; i++) { ax += a[i][0]; ay += a[i][1]; bx += b[i][0]; by += b[i][1]; }
+  ax /= n; ay /= n; bx /= n; by /= n;
+  let num1 = 0, num2 = 0, den = 0, spreadB = 0;
+  for (let i = 0; i < n; i++) {
+    const px = a[i][0] - ax, py = a[i][1] - ay, qx = b[i][0] - bx, qy = b[i][1] - by;
+    num1 += px * qx + py * qy;
+    num2 += px * qy - py * qx;
+    den += px * px + py * py;
+    spreadB += qx * qx + qy * qy;
+  }
+  if (den < 1e-18 || spreadB < 1e-14) return null;
+  const ra = num1 / den, rb = num2 / den;
+  // a mirrored previous layout gives a poor (near-zero) fit: treat as no reference
+  if (Math.hypot(ra, rb) * Math.sqrt(den) < Math.sqrt(spreadB) * 0.25) return null;
+  return { a: ra, b: rb, tx: bx - (ra * ax - rb * ay), ty: by - (rb * ax + ra * ay) };
 }
 
 /** Planar projection of a group of faces along `n`. */
@@ -264,20 +331,104 @@ export function smartProjectIslands(m: Mesh, faces: number[], angleDeg = 66): Is
   return islands;
 }
 
-export function unwrapLSCM(m: Mesh, margin = 0.02): { charts: number; fallback: number } {
+export function unwrapLSCM(m: Mesh, margin = 0.02): { charts: number; fallback: number; pinned: number } {
   const faces = targetFaces(m);
   const charts = chartsBySeams(m, faces);
   const islands: Island[] = [];
-  let fallback = 0;
+  let fallback = 0, pinned = 0;
   for (const c of charts) {
     let isl: Island | null = null;
-    if (chartHasBoundary(m, c)) isl = lscmChart(m, c);
+    if (chartHasBoundary(m, c)) isl = lscmChart(m, c, { pins: true });
     if (isl && !islandOK(m, isl)) isl = null;
     if (!isl) { fallback++; islands.push(...smartProjectIslands(m, c)); }
+    else if (isl.fixed) { placeIsland(m, isl); pinned++; }
     else islands.push(isl);
   }
+  // islands anchored by pins stay where they are; the rest are packed
   applyIslands(m, islands, margin);
-  return { charts: islands.length, fallback };
+  m.uvChanged();
+  return { charts: islands.length + pinned, fallback, pinned };
+}
+
+function placeIsland(m: Mesh, isl: Island) {
+  for (const [fi, uv] of isl.uv) m.faces[fi].uv = uv;
+}
+
+/** Seam charts (over the whole mesh) that contain any of the given faces. */
+export function chartsOf(m: Mesh, faces: Iterable<number>): number[][] {
+  const want = new Set(faces);
+  return chartsBySeams(m, m.faces.map((_, i) => i)).filter((c) => c.some((f) => want.has(f)));
+}
+
+/**
+ * Live unwrap: re-solve the given charts in place, around their pins (or
+ * fitted onto their current layout when unpinned). Closed charts are skipped.
+ */
+export function liveUnwrap(m: Mesh, charts: number[][]): { solved: number; skipped: number } {
+  let solved = 0, skipped = 0;
+  for (const c of charts) {
+    const isl = chartHasBoundary(m, c) ? lscmChart(m, c, { pins: true, inPlace: true }) : null;
+    if (isl?.fixed && islandOK(m, isl)) { placeIsland(m, isl); solved++; } else skipped++;
+  }
+  if (solved) m.uvChanged();
+  return { solved, skipped };
+}
+
+/* ------------------------------------------------------------------ stretch */
+
+export type StretchMode = 'angle' | 'area';
+
+/**
+ * Per-face UV distortion in [0, 1] (0 = none). Angle: how far each triangle's
+ * mapping is from conformal (1 − σmin/σmax of its Jacobian). Area: how far the
+ * face's share of UV area is from its share of surface area. Faces with no UV
+ * area count as fully stretched.
+ */
+export function uvStretch(m: Mesh, faces: number[], mode: StretchMode): { face: Float32Array; mean: number } {
+  const out = new Float32Array(m.faces.length);
+  const a3 = new Float64Array(m.faces.length), a2 = new Float64Array(m.faces.length);
+  let tot3 = 0, tot2 = 0;
+  for (const fi of faces) {
+    const f = m.faces[fi];
+    let ang = 0, wsum = 0;
+    for (const [i, j, k] of f.v.length === 3 ? [[0, 1, 2]] : triangulateFace(m.verts, f.v)) {
+      const P0 = m.verts[f.v[i]], P1 = m.verts[f.v[j]], P2 = m.verts[f.v[k]];
+      const e1 = sub(P1, P0), e2 = sub(P2, P0);
+      const nrm = cross(e1, e2);
+      const area3 = len(nrm) / 2;
+      if (area3 < 1e-14) continue;
+      const ux = normalize(e1), uy = normalize(cross(nrm, e1));
+      // 3D triangle in its own plane
+      const x1 = len(e1), x2 = dot(e2, ux), y2 = dot(e2, uy);
+      const u0 = f.uv[i], u1 = f.uv[j], u2 = f.uv[k];
+      const du1 = [u1[0] - u0[0], u1[1] - u0[1]], du2 = [u2[0] - u0[0], u2[1] - u0[1]];
+      const area2 = Math.abs(du1[0] * du2[1] - du1[1] * du2[0]) / 2;
+      a3[fi] += area3; a2[fi] += area2;
+      if (mode === 'angle') {
+        // Jacobian J = [du1 du2] · inv([x1 x2; 0 y2])
+        const inv = [1 / x1, -x2 / (x1 * y2), 0, 1 / y2];
+        const J = [du1[0] * inv[0] + du2[0] * inv[2], du1[0] * inv[1] + du2[0] * inv[3], du1[1] * inv[0] + du2[1] * inv[2], du1[1] * inv[1] + du2[1] * inv[3]];
+        const E = J[0] * J[0] + J[2] * J[2], F = J[0] * J[1] + J[2] * J[3], G = J[1] * J[1] + J[3] * J[3];
+        const r = Math.sqrt(((E - G) / 2) ** 2 + F * F);
+        const smax = Math.sqrt(Math.max(0, (E + G) / 2 + r)), smin = Math.sqrt(Math.max(0, (E + G) / 2 - r));
+        ang += (smax > 1e-12 ? 1 - smin / smax : 1) * area3;
+        wsum += area3;
+      }
+    }
+    tot3 += a3[fi]; tot2 += a2[fi];
+    if (mode === 'angle') out[fi] = wsum > 0 ? ang / wsum : 1;
+  }
+  if (mode === 'area') {
+    for (const fi of faces) {
+      if (a3[fi] <= 0) { out[fi] = 0; continue; }
+      if (a2[fi] <= 1e-14 || tot2 <= 0) { out[fi] = 1; continue; }
+      const r = (a2[fi] / tot2) / (a3[fi] / tot3);
+      out[fi] = 1 - Math.min(r, 1 / r);
+    }
+  }
+  let mean = 0, w = 0;
+  for (const fi of faces) { mean += out[fi] * a3[fi]; w += a3[fi]; }
+  return { face: out, mean: w > 0 ? mean / w : 0 };
 }
 
 /** Sanity check: islands with collapsed or wildly distorted area are rejected. */

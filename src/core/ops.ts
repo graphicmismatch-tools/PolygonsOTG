@@ -538,7 +538,7 @@ function planarUV(pts: V3[]): V2[] {
 
 export function flipFaces(m: Mesh, which?: number[]) {
   const list = which ?? [...m.selF];
-  for (const fi of list) { const f = m.faces[fi]; f.v.reverse(); f.uv.reverse(); }
+  for (const fi of list) { const f = m.faces[fi]; f.v.reverse(); f.uv.reverse(); f.pin?.reverse(); }
   m.changed();
 }
 
@@ -564,7 +564,7 @@ export function recalcNormals(m: Mesh, onlySelected = true) {
           const g = m.faces[nf];
           const gi = g.v.indexOf(a);
           // consistent neighbour traverses the edge b->a
-          if (g.v[(gi + 1) % g.v.length] === b) { g.v.reverse(); g.uv.reverse(); }
+          if (g.v[(gi + 1) % g.v.length] === b) { g.v.reverse(); g.uv.reverse(); g.pin?.reverse(); }
           visited.add(nf);
           queue.push(nf);
         }
@@ -580,7 +580,7 @@ export function recalcNormals(m: Mesh, onlySelected = true) {
       const p0 = sub(m.verts[f.v[0]], c);
       for (let i = 1; i + 1 < f.v.length; i++) vol += dot(p0, cross(sub(m.verts[f.v[i]], c), sub(m.verts[f.v[i + 1]], c)));
     }
-    if (vol < 0) for (const fi of comp) { m.faces[fi].v.reverse(); m.faces[fi].uv.reverse(); }
+    if (vol < 0) for (const fi of comp) { m.faces[fi].v.reverse(); m.faces[fi].uv.reverse(); m.faces[fi].pin?.reverse(); }
   }
   m.changed();
 }
