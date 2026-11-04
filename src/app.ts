@@ -58,6 +58,12 @@ export class App {
   wbrush: WeightBrush = defaultWeightBrush();
   /** Vertex group (bone name) painted in weight mode. */
   weightGroup: string | null = null;
+  /** Timeline */
+  frame = 1;
+  playing = false;
+  autoKey = false;
+  private playStart = 0;
+  private playFrom = 1;
   modal: Modal | null = null;
   settings: Settings = {
     mirrorX: false,
@@ -428,6 +434,8 @@ export class App {
     if (m.kind === 'transform') {
       m.session.endDrag();
       m.onConfirm?.();
+      const t = m.session.target;
+      if (t.kind === 'bones' && this.autoKey) this.keyBones(t.obj, t.bones);
     } else m.flush?.();
     this.emit('modal');
     this.changed();
@@ -1687,6 +1695,14 @@ export class App {
           pi = -1;
         }
       }
+      // mirror IK settings onto the partners
+      for (const i of src) {
+        const b = arm.bones[i];
+        if (!b.ik) continue;
+        const pi = arm.bones.findIndex((x) => x.name === rig.flipName(b.name));
+        const mirrorIdx = (k: number) => (k < 0 ? -1 : Math.max(-1, arm.bones.findIndex((x) => x.name === rig.flipName(arm.bones[k].name))));
+        if (pi >= 0 && pi !== i) arm.bones[pi].ik = { ...b.ik, target: mirrorIdx(b.ik.target), pole: mirrorIdx(b.ik.pole), poleAngle: -b.ik.poleAngle };
+      }
       rig.syncJointMesh(m, arm);
       this.status(made ? `Mirrored ${made} bone${made > 1 ? 's' : ''} to −X` : 'Updated mirrored bones');
     });
@@ -1701,6 +1717,7 @@ export class App {
     this.record('Rename Bone');
     if (arm.bones.some((b, k) => k !== i && b.name === name)) name = rig.uniqueBoneName(arm, name);
     arm.bones[i].name = name;
+    rig.renameTracks(arm, old, name);
     for (const ob of this.scene.objects) {
       if (!ob.modifiers.some((md) => md.type === 'armature' && md.target === o.id)) continue;
       const g = ob.mesh.groups.indexOf(old);
@@ -1803,6 +1820,208 @@ export class App {
     this.record('Unbind');
     for (const o of meshes) o.modifiers = o.modifiers.filter((m) => m.type !== 'armature');
     this.changed();
+  }
+
+  setBoneIK(o: SceneObject, i: number, patch: Partial<rig.IKConstraint> | null) {
+    const arm = o.armature!;
+    const b = arm.bones[i];
+    this.record(patch ? 'IK constraint' : 'Remove IK');
+    if (!patch) delete b.ik;
+    else {
+      b.ik = { enabled: true, target: -1, chain: 2, pole: -1, poleAngle: 0, ...(b.ik ?? {}), ...patch };
+      if (b.ik.target >= 0 && !rig.validIK(arm, i)) this.status('That target is moved by the chain itself — use an unparented control bone');
+    }
+    o.mesh.touch();
+    this.changed();
+  }
+
+  /** Make an unparented, non-deforming control bone at the selected bone's tip and use it as its IK target. */
+  addIKTarget(o: SceneObject, i: number) {
+    const arm = o.armature!, m = o.mesh;
+    const b = arm.bones[i];
+    this.record('Add IK target');
+    const ev = rig.evalArmature(m, arm);
+    const tip = new THREE.Vector3(0, rig.boneLength(m, b), 0).applyMatrix4(ev.posed[i]);
+    const len = Math.max(0.05, rig.boneLength(m, b) * 0.4);
+    const h = m.addVert([tip.x, tip.y, tip.z]);
+    const t = m.addVert([tip.x, tip.y, tip.z + len]);
+    const base = b.name.replace(/([._][LR])$/, '');
+    const side = b.name.match(/([._][LR])$/)?.[1] ?? '';
+    arm.bones.push({ name: rig.uniqueBoneName(arm, `IK_${base}${side}`), parent: -1, head: h, tail: t, roll: 0, deform: false, pose: rig.identityPose() });
+    rig.syncJointMesh(m, arm);
+    b.ik = { enabled: true, target: arm.bones.length - 1, chain: b.ik?.chain ?? 2, pole: b.ik?.pole ?? -1, poleAngle: b.ik?.poleAngle ?? 0 };
+    this.changed();
+    this.status('Added an IK target bone — move it in Pose mode');
+  }
+
+  /* ================================================================ animation */
+  /** Armature the timeline drives: the active armature, or the one the active mesh is bound to. */
+  get animArm(): SceneObject | null { return this.armObj ?? this.armatureOf(this.active); }
+  get action(): rig.Action | null { const a = this.animArm?.armature; return a && a.activeAction >= 0 ? a.actions[a.activeAction] ?? null : null; }
+
+  /** Jump to a frame: every armature takes its active action's pose. */
+  setFrame(f: number, notify = true) {
+    this.frame = Math.round(f * 1000) / 1000;
+    for (const o of this.scene.objects) {
+      const arm = o.armature;
+      const act = arm && arm.activeAction >= 0 ? arm.actions[arm.activeAction] : null;
+      if (!arm || !act) continue;
+      rig.applyAction(arm, act, this.frame);
+      o.mesh.touch();
+    }
+    this.redraw();
+    if (notify) this.emit('frame');
+  }
+
+  togglePlay() {
+    if (this.playing) { this.playing = false; this.setFrame(Math.round(this.frame)); this.emit('frame'); return; }
+    this.confirmModal();
+    const act = this.action;
+    if (!act) { this.status('Make a keyframe first'); return; }
+    this.playing = true;
+    this.playStart = performance.now();
+    this.playFrom = this.frame < act.start || this.frame >= act.end ? act.start : this.frame;
+    const tick = () => {
+      if (!this.playing) return;
+      const a = this.action;
+      if (!a) { this.playing = false; this.emit('frame'); return; }
+      const span = Math.max(1, a.end - a.start);
+      const f = this.playFrom + ((performance.now() - this.playStart) / 1000) * a.fps;
+      this.setFrame(a.start + ((f - a.start) % span + span) % span, false);
+      this.emit('frame');
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    this.emit('frame');
+  }
+
+  /** Create the active armature's first action on demand. */
+  private ensureAction(o: SceneObject): rig.Action {
+    const arm = o.armature!;
+    if (arm.activeAction < 0 || !arm.actions[arm.activeAction]) {
+      if (!arm.actions.length) arm.actions.push(rig.newAction('Action'));
+      arm.activeAction = 0;
+    }
+    return arm.actions[arm.activeAction];
+  }
+
+  private keyBones(o: SceneObject, bones: number[]) {
+    const act = this.ensureAction(o);
+    rig.insertKeys(o.armature!, act, bones, Math.round(this.frame));
+    if (this.frame > act.end) act.end = Math.round(this.frame);
+    this.emit('frame');
+  }
+
+  /** Key the selected bones (all bones when none are selected) at the current frame. */
+  insertKey() {
+    const o = this.animArm;
+    if (!o) { this.status('Select an armature'); return; }
+    this.confirmModal();
+    const arm = o.armature!;
+    const bones = this.mode === 'pose' && arm.selected.length ? arm.selected : arm.bones.map((_, i) => i);
+    this.record('Insert Keyframe');
+    this.keyBones(o, bones);
+    this.changed();
+    this.status(`Keyed ${bones.length} bone${bones.length > 1 ? 's' : ''} at frame ${Math.round(this.frame)}`);
+  }
+
+  deleteKey() {
+    const o = this.animArm, act = this.action;
+    if (!o || !act) return;
+    const arm = o.armature!;
+    const bones = this.mode === 'pose' && arm.selected.length ? arm.selected : arm.bones.map((_, i) => i);
+    this.record('Delete Keyframe');
+    const n = rig.deleteKeys(arm, act, bones, Math.round(this.frame));
+    if (!n) { this.history.cancelLast(); this.status('No keys on this frame'); return; }
+    this.setFrame(this.frame);
+    this.changed();
+  }
+
+  /** Interpolation of the keys at the current frame (selected bones, or all). */
+  setKeyInterp(interp: rig.Interp) {
+    const o = this.animArm, act = this.action;
+    if (!o || !act) return;
+    const arm = o.armature!;
+    const bones = this.mode === 'pose' && arm.selected.length ? arm.selected : arm.bones.map((_, i) => i);
+    this.record('Key interpolation');
+    let n = 0;
+    for (const i of bones) for (const k of act.tracks[arm.bones[i].name] ?? []) if (Math.abs(k.frame - Math.round(this.frame)) < 1e-6) { k.interp = interp; n++; }
+    if (!n) { this.history.cancelLast(); this.status('No keys on this frame'); return; }
+    this.setFrame(this.frame);
+    this.changed();
+  }
+
+  /** Key frames shown on the timeline (selected bones in pose mode, else all). */
+  timelineKeys(): number[] {
+    const o = this.animArm, act = this.action;
+    if (!o || !act) return [];
+    const arm = o.armature!;
+    return rig.keyFrames(arm, act, this.mode === 'pose' && arm.selected.length ? arm.selected : undefined);
+  }
+
+  jumpKey(dir: 1 | -1) {
+    const ks = this.timelineKeys();
+    const f = Math.round(this.frame);
+    const k = dir > 0 ? ks.find((x) => x > f) : [...ks].reverse().find((x) => x < f);
+    if (k !== undefined) this.setFrame(k);
+  }
+
+  private actionOp(label: string, fn: (arm: rig.Armature, o: SceneObject) => boolean | void) {
+    const o = this.animArm;
+    if (!o) { this.status('Select an armature'); return; }
+    this.confirmModal();
+    this.record(label);
+    if (fn(o.armature!, o) === false) { this.history.cancelLast(); return; }
+    this.setFrame(this.frame);
+    this.changed();
+  }
+
+  newAction(copy = false) {
+    this.actionOp(copy ? 'Duplicate Action' : 'New Action', (arm) => {
+      const cur = arm.actions[arm.activeAction];
+      const names = new Set(arm.actions.map((a) => a.name));
+      let name = copy && cur ? `${cur.name}.copy` : 'Action';
+      for (let i = 1; names.has(name); i++) name = `${copy && cur ? cur.name : 'Action'}.${String(i).padStart(3, '0')}`;
+      const act = copy && cur ? { ...rig.cloneAction(cur), name } : rig.newAction(name);
+      if (!copy) for (const b of arm.bones) b.pose = rig.identityPose();
+      arm.actions.push(act);
+      arm.activeAction = arm.actions.length - 1;
+    });
+  }
+
+  setActiveAction(i: number) {
+    this.actionOp('Switch Action', (arm) => {
+      if (!arm.actions[i]) return false;
+      arm.activeAction = i;
+      for (const b of arm.bones) b.pose = rig.identityPose();
+    });
+  }
+
+  renameAction(name: string) {
+    name = name.trim();
+    this.actionOp('Rename Action', (arm) => {
+      const a = arm.actions[arm.activeAction];
+      if (!a || !name || arm.actions.some((x) => x !== a && x.name === name)) return false;
+      a.name = name;
+    });
+  }
+
+  deleteAction() {
+    this.actionOp('Delete Action', (arm) => {
+      if (arm.activeAction < 0) return false;
+      arm.actions.splice(arm.activeAction, 1);
+      arm.activeAction = arm.actions.length ? Math.min(arm.activeAction, arm.actions.length - 1) : -1;
+      for (const b of arm.bones) b.pose = rig.identityPose();
+    });
+  }
+
+  setActionRange(start: number, end: number, fps?: number) {
+    this.actionOp('Frame range', (arm, o) => {
+      const a = arm.actions[arm.activeAction] ?? this.ensureAction(o);
+      a.start = Math.round(Math.min(start, end));
+      a.end = Math.max(a.start + 1, Math.round(Math.max(start, end)));
+      if (fps && fps > 0) a.fps = Math.min(240, fps);
+    });
   }
 
   /* ================================================================ weights */
@@ -1945,6 +2164,13 @@ export class App {
     if (e.key === 'Delete' || (k === 'x' && !ctrl)) { if (this.mode === 'object') this.deleteObjects(); else if (this.editObj?.armature) this.deleteBonesOp(); else if (this.isEditLike) this.deleteElements(); return; }
     if (this.mode === 'pose') {
       if (k === 'r' && e.altKey) return this.clearPose();
+      if (k === 'i' && e.altKey) return this.deleteKey();
+      if (k === 'i' && !ctrl) return this.insertKey();
+    }
+    if ((this.mode === 'pose' || this.mode === 'object') && this.animArm) {
+      if (e.key === ' ') { e.preventDefault(); return this.togglePlay(); }
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); return this.setFrame(Math.round(this.frame) + (e.key === 'ArrowRight' ? 1 : -1)); }
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); return this.jumpKey(e.key === 'ArrowUp' ? 1 : -1); }
     }
     if (this.isEditLike && this.editObj?.armature) {
       if (k === '1') return this.setSelectMode('vert');

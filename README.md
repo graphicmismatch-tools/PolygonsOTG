@@ -40,6 +40,8 @@ It runs as an Android app (Capacitor) and, from the same code, in any modern bro
 - **Binding:** select the mesh and the armature, then use Rig → Bind. It adds an Armature modifier and, optionally, automatic weights (distance to the bones, smoothed across the surface). Rig → Bind with empty groups leaves the weights for you to paint.
 - **Pose mode:** tap a bone to select it, or drag a bone to rotate it about its joint. R/G/S work too, with axis locks and typed values. Clear the pose of selected bones or the whole rig. Bound meshes deform live in Object and Pose mode.
 - **Weight mode:** paint one bone's group (blue 0 → red 1) with draw, add, subtract and smooth brushes, with pen pressure and .L/.R X symmetry. Also: automatic weights, assign or remove the Edit-mode selection, mirror, normalize, and clear group.
+- **Inverse kinematics:** in the bone panel, "Add IK + target bone" creates a control bone at the tip. Moving it bends the chain (choose its length, or up to the root). An optional pole bone sets which way the chain bends, with an extra pole angle. IK is solved with FABRIK and only changes bone rotations.
+- **Animation:** the Pose-mode timeline scrubs, plays (looping) and steps between keys. ◆ keys the selected bones at the current frame (all bones when none are selected), and auto-key keys every confirmed pose change. Keys ease in and out by default; linear and constant (stepped) are available per key. Each armature can hold several actions (clips) with their own frame range and fps: create, duplicate, rename, switch and delete them from the film button.
 - **Weights follow edits:** extrude, inset, loop cut, bevel, subdivide, knife and the rest interpolate weights for new vertices. Mirror and Subdivision modifiers carry them through, and remesh and decimate transfer them to the new mesh.
 
 ### Remesh & decimate
@@ -56,7 +58,8 @@ Use these as modifiers or as one-step actions (the globe button in the Object an
 
 ### Files
 - **Import:** OBJ, glTF/GLB and STL.
-- **Export:** OBJ (with UVs and normals), GLB (with materials and textures, and skinned meshes with their skeleton in rest pose), STL and PNG screenshots. OBJ and STL use the current pose.
+- **Export:** OBJ (with UVs and normals), GLB (with materials and textures, skinned meshes, the skeleton and every action as an animation clip), STL and PNG screenshots. OBJ and STL use the current pose.
+- **Export check:** before saving, the app lists what the chosen format would lose or change (rigs and colours in OBJ/STL, wire edges, unweighted vertices, more than 4 bone influences, a pose that isn't keyed) and asks before going ahead.
 - **Projects:** saved as `.potg` files, with autosave on the device.
 - **On Android**, exports open the share sheet: choose "Save to Files" or any app.
 
@@ -133,7 +136,8 @@ The modelling kernel is plain TypeScript with no rendering dependency. three.js 
 - LSCM unwrapping needs seams on closed shapes. Closed parts without seams fall back to smart projection.
 - Bevel needs edges with faces on both sides. Corners where three or more bevelled edges meet get a flat patch.
 - The knife cuts in straight lines from edge to edge.
-- GLB export keeps the 4 strongest bones per vertex (glTF's limit). Vertices without weights are bound to the root bone. There is no animation yet, so the skeleton exports in rest pose.
+- GLB export keeps the 4 strongest bones per vertex (glTF's limit). Vertices without weights are bound to the root bone. Animations are sampled at every frame (which bakes IK and easing), so files grow with clip length.
+- Only armatures are animated: object transforms, shape keys and materials can't be keyed yet.
 - Automatic weights use distance to the bones, not heat diffusion: check thin parts that sit close to other bones (fingers, arms near the torso) and touch them up in Weight mode.
 - Meshes follow an armature through the Armature modifier, not object parenting: moving the armature object doesn't move a bound mesh in rest pose.
 - Edit mode stays responsive up to a few tens of thousands of faces on current tablets.

@@ -152,7 +152,7 @@ export function armatureKey(scene: Scene, obj: SceneObject): string {
     if (m.type !== 'armature' || !m.enabled || !m.target) continue;
     const a = scene.byId(m.target);
     if (!a?.armature) { k += '|none'; continue; }
-    k += `|${a.mesh.version}|${a.position}|${a.rotation}|${a.scale}|${obj.position}|${obj.rotation}|${obj.scale}|` + a.armature.bones.map((b) => `${b.name}:${b.parent}:${b.roll}:${b.deform}:${b.pose.rot}:${b.pose.loc}:${b.pose.scale}`).join(';');
+    k += `|${a.mesh.version}|${a.position}|${a.rotation}|${a.scale}|${obj.position}|${obj.rotation}|${obj.scale}|` + a.armature.bones.map((b) => `${b.name}:${b.parent}:${b.roll}:${b.deform}:${b.pose.rot}:${b.pose.loc}:${b.pose.scale}:${b.ik ? JSON.stringify(b.ik) : ''}`).join(';');
   }
   return k;
 }

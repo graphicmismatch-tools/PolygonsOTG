@@ -396,7 +396,7 @@ export class Viewport {
     const rest = (isActive && mode === 'edit') || mode === 'weight';
     const posing = isActive && mode === 'pose';
     const objSel = mode === 'object' && scene.selected.has(o.id);
-    const key = `${m.version}|${rest}|${posing}|${objSel}|${isActive}|${arm.selected}|${arm.active}|` + arm.bones.map((b) => `${b.parent}:${b.head}:${b.tail}:${b.roll}:${b.pose.rot}:${b.pose.loc}:${b.pose.scale}`).join(';');
+    const key = `${m.version}|${rest}|${posing}|${objSel}|${isActive}|${arm.selected}|${arm.active}|` + arm.bones.map((b) => `${b.parent}:${b.head}:${b.tail}:${b.roll}:${b.pose.rot}:${b.pose.loc}:${b.pose.scale}:${b.ik ? JSON.stringify(b.ik) : ''}`).join(';');
     if (v.bones && v.boneKey === key) return;
     v.boneKey = key;
     const ev = evalArmature(m, arm, !rest);

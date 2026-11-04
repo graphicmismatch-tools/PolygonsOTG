@@ -132,6 +132,16 @@ const ICONS: Record<string, IconDef> = {
   clearPose: { d: 'M4 12a8 8 0 1016 0 8 8 0 00-16 0M4 4l4 4M8 4v4H4' },
   autoWeights: { d: 'M13 2L4 14h7l-1 8 9-12h-7z', fill: 'M13 2L4 14h7l-1 8 9-12h-7z' },
   wDraw: { d: 'M4 20c2-8 6-13 8-16 2 3 6 8 8 16z', bold: 'M8 20h8' },
+  // animation
+  play: { d: 'M7 4l13 8-13 8z', fill: 'M7 4l13 8-13 8z' },
+  pause: { d: 'M7 4v16M17 4v16', bold: 'M7 4v16M17 4v16' },
+  key: { d: 'M12 3l7 9-7 9-7-9z', fill: 'M12 3l7 9-7 9-7-9z' },
+  keyDel: { d: 'M12 3l7 9-7 9-7-9zM8 12h8' },
+  prevKey: { d: 'M5 4v16M19 5l-5 7 5 7-5-7z', fill: 'M19 5l-5 7 5 7' },
+  nextKey: { d: 'M19 4v16M5 5l5 7-5 7 5-7z', fill: 'M5 5l5 7-5 7' },
+  autoKey: { d: 'M12 3a9 9 0 100 18 9 9 0 000-18z', solid: dot(12, 12, 4.5) },
+  ik: { d: 'M4 20l6-8 4 6 6-12', solid: dot(20, 6, 2) },
+  film: { d: 'M3 5h18v14H3zM7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4' },
 };
 
 export function icon(name: string, size = 22): SVGSVGElement {

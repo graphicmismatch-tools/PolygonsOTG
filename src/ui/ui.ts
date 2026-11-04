@@ -6,13 +6,14 @@ import { PRIMITIVES } from '../core/primitives';
 import { BRUSHES } from '../modes/sculpt';
 import { UVEditor } from '../modes/uvEditor';
 import { SceneObject } from '../core/scene';
-import { exportOBJ, exportSTL, exportGLB, importOBJ, importGLTF, importSTL, serializeProject } from '../io/formats';
+import { exportOBJ, exportSTL, exportGLB, exportCheck, importOBJ, importGLTF, importSTL, serializeProject } from '../io/formats';
 import { saveFile, openFile, readAsDataURL, isAndroidApp } from '../io/files';
 import { Axis } from '../modes/transform';
 import { V3 } from '../core/vec';
 import { Modifier } from '../core/modifiers';
 import { openInputTest } from './inputTest';
 import { WEIGHT_TOOLS } from '../modes/weightPaint';
+import * as rig from '../core/armature';
 import { colorPicker } from './colorPicker';
 
 const MODES: { id: AppMode; label: string; icon: string }[] = [
@@ -47,6 +48,7 @@ export class UI {
   modalBar!: HTMLElement;
   editBar!: HTMLElement;
   statusEl!: HTMLElement;
+  timeline!: HTMLElement;
   uv!: UVEditor;
   app!: App;
   private panelScroll = 0;
@@ -69,10 +71,11 @@ export class UI {
     this.modalBar = h('div', { class: 'modalbar hidden' });
     this.editBar = h('div', { class: 'editbar' });
     this.statusEl = h('div', { class: 'status' });
+    this.timeline = h('div', { class: 'timeline hidden' });
     const workspace = h('div', { class: 'workspace' }, this.view3d, this.viewUV);
     const main = h('div', { class: 'main' }, this.rail, workspace, this.panel);
     this.root.append(this.topbar, main);
-    this.view3d.append(this.editBar, this.modalBar, this.statusEl, this.navWidget());
+    this.view3d.append(this.editBar, this.modalBar, this.timeline, this.statusEl, this.navWidget());
 
     this.app = new App(canvas, overlay, this.view3d);
     this.uv = new UVEditor(uvCanvas, this.viewUV, this.app);
@@ -84,10 +87,11 @@ export class UI {
 
     const app = this.app;
     app.on('mode', () => { this.renderAll(); });
-    app.on('change', () => { this.renderPanel(); this.renderStatus(); this.renderEditBar(); });
+    app.on('change', () => { this.renderPanel(); this.renderStatus(); this.renderEditBar(); this.renderTimeline(); });
     app.on('modal', () => this.renderModal());
     app.on('history', () => this.renderTop());
     app.on('status', () => this.renderStatus());
+    app.on('frame', () => this.renderTimeline());
 
     const ro = new ResizeObserver(() => { app.resize(); this.uv.resize(); });
     ro.observe(this.view3d);
@@ -135,6 +139,7 @@ export class UI {
     this.renderPanel();
     this.renderModal();
     this.renderStatus();
+    this.renderTimeline();
     requestAnimationFrame(() => { this.app.resize(); this.uv.resize(); });
   }
 
@@ -233,10 +238,20 @@ export class UI {
     }
   }
 
-  private async exportModel(kind: 'obj' | 'glb' | 'stl') {
+  private async exportModel(kind: 'obj' | 'glb' | 'stl', checked = false) {
     const objs = this.exportTargets();
     if (!objs.length) { toast('Nothing to export'); return; }
     this.app.confirmModal();
+    if (!checked) {
+      const { warnings, notes } = exportCheck(kind, objs, this.app.scene);
+      if (warnings.length) {
+        const body = h('div', {},
+          h('ul', { class: 'warnlist' }, warnings.map((w) => h('li', {}, w)), notes.map((n) => h('li', { class: 'info' }, n))));
+        dialog(`Export ${kind.toUpperCase()}: check before saving`, body, [{ label: 'Cancel' }, { label: 'Export anyway', primary: true, action: () => this.exportModel(kind, true) }]);
+        return;
+      }
+      if (notes.length) toast(notes[0]);
+    }
     const name = objs.length === 1 ? objs[0].name : 'scene';
     try {
       if (kind === 'obj') await saveFile(`${name}.obj`, 'text/plain', exportOBJ(objs, true, this.app.scene));
@@ -631,6 +646,101 @@ export class UI {
     return inp;
   }
 
+  /* ================================================================ timeline */
+  private tlDragging = false;
+
+  renderTimeline() {
+    const app = this.app;
+    const arm = app.animArm;
+    const act = app.action;
+    const show = !!arm && (app.mode === 'pose' || (app.mode === 'object' && !!act));
+    this.timeline.classList.toggle('hidden', !show);
+    if (!show) return;
+    // during playback / scrubbing only move the playhead
+    const track = this.timeline.querySelector('.tl-track') as HTMLElement | null;
+    const start = act?.start ?? 1, end = act?.end ?? 48;
+    const x = (f: number) => `${((f - start) / Math.max(1, end - start)) * 100}%`;
+    const frameInput = this.timeline.querySelector('input.num') as HTMLInputElement | null;
+    if (track && (app.playing || this.tlDragging) && this.timeline.dataset.key === `${arm!.id}|${app.mode}|${start}|${end}`) {
+      const head = track.querySelector('.tl-head') as HTMLElement;
+      head.style.left = x(app.frame);
+      (head.firstChild as HTMLElement).textContent = String(Math.round(app.frame));
+      if (frameInput && document.activeElement !== frameInput) frameInput.value = String(Math.round(app.frame));
+      return;
+    }
+    this.timeline.dataset.key = `${arm!.id}|${app.mode}|${start}|${end}`;
+    clear(this.timeline);
+    const chip = (iconName: string, tip: string, action: () => void, on = false) => h('button', { class: `chip${on ? ' on' : ''}`, tip, onclick: action }, icon(iconName, 20));
+    const tr = h('div', { class: 'tl-track', tip: 'Drag to scrub' });
+    for (let f = Math.ceil(start / 10) * 10; f <= end; f += 10) tr.append(h('div', { class: 'tl-mark', style: `left:${x(f)}` }));
+    for (const k of app.timelineKeys()) if (k >= start && k <= end) tr.append(h('div', { class: 'tl-tick', style: `left:${x(k)}` }));
+    tr.append(h('div', { class: 'tl-head', style: `left:${x(app.frame)}` }, h('span', {}, String(Math.round(app.frame)))));
+    const scrub = (e: PointerEvent) => {
+      const r = tr.getBoundingClientRect();
+      const t = Math.min(1, Math.max(0, (e.clientX - r.left) / Math.max(1, r.width)));
+      app.setFrame(Math.round(start + t * (end - start)));
+    };
+    tr.addEventListener('pointerdown', (e) => { e.preventDefault(); if (app.playing) app.togglePlay(); this.tlDragging = true; tr.setPointerCapture(e.pointerId); scrub(e); });
+    tr.addEventListener('pointermove', (e) => { if (this.tlDragging) scrub(e); });
+    const stop = () => { if (!this.tlDragging) return; this.tlDragging = false; this.renderTimeline(); };
+    tr.addEventListener('pointerup', stop);
+    tr.addEventListener('pointercancel', stop);
+    const fi = h('input', { class: 'num', type: 'text', inputmode: 'numeric', value: String(Math.round(app.frame)), 'aria-label': 'Frame' }) as HTMLInputElement;
+    fi.addEventListener('change', () => { const v = parseFloat(fi.value); if (isFinite(v)) app.setFrame(Math.round(v)); });
+    const actBtn: HTMLButtonElement = h('button', { class: 'chip tl-action', tip: 'Actions (animation clips)', onclick: () => showMenu(actBtn, this.actionItems(), 'Actions') }, icon('film', 18), act?.name ?? 'No action');
+    const posing = app.mode === 'pose';
+    this.timeline.append(...([
+      chip(app.playing ? 'pause' : 'play', app.playing ? 'Pause (Space)' : 'Play (Space)', () => app.togglePlay(), app.playing),
+      chip('prevKey', 'Previous key (↓)', () => app.jumpKey(-1)),
+      posing ? chip('key', 'Insert keyframe for selected bones (I)', () => app.insertKey()) : null as any,
+      posing ? chip('keyDel', 'Delete keyframe (Alt+I)', () => app.deleteKey()) : null as any,
+      chip('nextKey', 'Next key (↑)', () => app.jumpKey(1)),
+      tr,
+      h('span', { class: 'tl-range' }, `${start}–${end} · ${act?.fps ?? 24}fps`),
+      fi,
+      posing ? chip('autoKey', app.autoKey ? 'Auto-key: on — confirming a pose transform keys it' : 'Auto-key: off', () => { app.autoKey = !app.autoKey; this.renderTimeline(); }, app.autoKey) : null as any,
+      actBtn,
+    ] as (Node | null)[]).filter((n): n is Node => !!n));
+  }
+
+  private actionItems(): MenuItem[] {
+    const app = this.app;
+    const arm = app.animArm?.armature;
+    if (!arm) return [];
+    const act = app.action;
+    const items: MenuItem[] = arm.actions.map((a, i) => ({ label: a.name, hint: `${a.start}–${a.end}`, checked: i === arm.activeAction, action: () => app.setActiveAction(i) }));
+    if (items.length) items.push({ separator: true, label: '' });
+    items.push(
+      { label: 'New action', hint: 'starts from rest pose', action: () => app.newAction() },
+      { label: 'Duplicate action', disabled: !act, action: () => app.newAction(true) },
+      { label: 'Rename…', disabled: !act, action: () => this.promptText('Rename action', act!.name, (v) => app.renameAction(v)) },
+      { label: 'Frame range & speed…', action: () => this.rangeDialog() },
+      { label: 'Key interpolation', disabled: !act, submenu: () => [
+        { label: 'Ease in/out', action: () => app.setKeyInterp('ease') },
+        { label: 'Linear', action: () => app.setKeyInterp('linear') },
+        { label: 'Constant (step)', action: () => app.setKeyInterp('constant') },
+      ] },
+      { label: 'Delete action', disabled: !act, action: () => app.deleteAction() },
+    );
+    return items;
+  }
+
+  private promptText(title: string, value: string, done: (v: string) => void) {
+    const inp = h('input', { class: 'text', value }) as HTMLInputElement;
+    dialog(title, h('div', { class: 'settings' }, inp), [{ label: 'Cancel' }, { label: 'OK', primary: true, action: () => done(inp.value) }]);
+    setTimeout(() => inp.select(), 50);
+  }
+
+  private rangeDialog() {
+    const act = this.app.action;
+    const num = (label: string, v: number) => { const i = h('input', { class: 'num', type: 'text', inputmode: 'numeric', value: String(v) }) as HTMLInputElement; return [h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, label), i), i] as const; };
+    const [r1, s1] = num('Start frame', act?.start ?? 1), [r2, s2] = num('End frame', act?.end ?? 48), [r3, s3] = num('Frames per second', act?.fps ?? 24);
+    dialog('Frame range & speed', h('div', { class: 'settings' }, r1, r2, r3), [{ label: 'Cancel' }, { label: 'Apply', primary: true, action: () => {
+      const a = parseFloat(s1.value), b = parseFloat(s2.value), f = parseFloat(s3.value);
+      if (isFinite(a) && isFinite(b)) this.app.setActionRange(a, b, isFinite(f) ? f : undefined);
+    } }]);
+  }
+
   /* ================================================================ status */
   renderStatus() {
     const app = this.app;
@@ -661,7 +771,7 @@ export class UI {
       return 'Touch = pen: tap select · drag empty = box select · drag element = move · 2 fingers pan/zoom · orbit with the nav buttons';
     }
     if (app.mode === 'weight') return `Painting ${app.weightGroup ?? '(no group)'} · blue 0 → red 1 · ${pen ? 'pen paints, fingers navigate' : 'drag on mesh to paint · drag off mesh to orbit'} · Ctrl inverts add/subtract`;
-    if (app.mode === 'pose') return pen ? 'Pen: tap a bone to select, drag a bone to rotate it · fingers navigate' : 'Tap a bone to select · drag a bone to rotate it · R/G/S + X/Y/Z for exact moves';
+    if (app.mode === 'pose') return (pen ? 'Pen: tap a bone to select, drag a bone to rotate it · fingers navigate' : 'Tap a bone to select · drag a bone to rotate it · R/G/S + X/Y/Z for exact moves') + ' · ◆ keys the selected bones at this frame';
     if (app.isEditLike && app.active?.armature) return 'Tap joints or bones · drag a joint to move it · Extrude (E) grows a child bone from the selected joint';
     if (app.mode === 'sculpt' && app.brush.dyntopo) return (pen ? 'Pen sculpts' : 'Drag on mesh to sculpt') + ' · dynamic topology adds detail under the brush (Detail slider)';
     if (app.mode === 'sculpt') return pen ? 'Pen sculpts (pressure) · fingers navigate' : 'Drag on mesh to sculpt · drag off mesh to orbit · 2 fingers pan/zoom';
@@ -898,6 +1008,37 @@ export class UI {
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: b.deform, onchange: (e: Event) => app.setBoneProp(o, i, 'Bone deform', (x) => (x.deform = (e.target as HTMLInputElement).checked)) }), 'Deforms the mesh'),
     );
     if (app.mode === 'pose') out.append(h('div', { class: 'row' }, h('button', { class: 'tiny', onclick: () => app.clearPose() }, 'Clear selected'), h('button', { class: 'tiny', onclick: () => app.clearPose(true) }, 'Clear all')));
+    // inverse kinematics
+    out.append(h('h3', {}, 'Inverse kinematics'));
+    const ik = b.ik;
+    if (!ik) {
+      out.append(
+        h('div', { class: 'note' }, 'IK makes this bone\'s tip reach for a target bone, bending the bones above it.'),
+        h('div', { class: 'row' },
+          h('button', { class: 'tiny', onclick: () => app.addIKTarget(o, i) }, 'Add IK + target bone'),
+          h('button', { class: 'tiny', onclick: () => app.setBoneIK(o, i, {}) }, 'Add IK')),
+      );
+    } else {
+      const boneSel = (cur: number, set: (v: number) => void, none: string) => {
+        const el = h('select', { class: 'text' }, h('option', { value: '-1' }, none), arm.bones.map((x, k) => (k === i ? null : h('option', { value: String(k), selected: cur === k }, x.name)))) as HTMLSelectElement;
+        el.addEventListener('change', () => set(+el.value));
+        return el;
+      };
+      const pa = h('input', { class: 'num', type: 'text', inputmode: 'decimal', value: fmt(deg(ik.poleAngle), 1) }) as HTMLInputElement;
+      pa.addEventListener('change', () => { const v = parseFloat(pa.value); if (isFinite(v)) app.setBoneIK(o, i, { poleAngle: rad(v) }); });
+      out.append(...[
+        h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: ik.enabled, onchange: (e: Event) => app.setBoneIK(o, i, { enabled: (e.target as HTMLInputElement).checked }) }), 'Enabled'),
+        h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Target'), boneSel(ik.target, (v) => app.setBoneIK(o, i, { target: v }), '(choose a bone)')),
+        h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Chain'),
+          h('button', { class: 'mbtn small', tip: 'Fewer bones', onclick: () => app.setBoneIK(o, i, { chain: Math.max(1, (ik.chain || rig.ikChain(arm, i).length) - 1) }) }, icon('minus', 14)),
+          h('span', { class: 'pval' }, ik.chain ? `${ik.chain} bone${ik.chain > 1 ? 's' : ''}` : 'to root'),
+          h('button', { class: 'mbtn small', tip: 'More bones', onclick: () => app.setBoneIK(o, i, { chain: Math.min(arm.bones.length, (ik.chain || rig.ikChain(arm, i).length) + 1) }) }, icon('plus', 14))),
+        h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Pole'), boneSel(ik.pole, (v) => app.setBoneIK(o, i, { pole: v }), '(none)')),
+        ik.pole >= 0 ? h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Pole°'), pa) : null,
+        ik.target >= 0 && !rig.validIK(arm, i) ? h('div', { class: 'note' }, 'The target is moved by this chain, so IK is off. Use an unparented control bone.') : null,
+        h('div', { class: 'row' }, h('button', { class: 'tiny', onclick: () => app.setBoneIK(o, i, null) }, 'Remove IK')),
+      ].filter((n): n is HTMLDivElement | HTMLLabelElement => !!n));
+    }
     return out;
   }
 
@@ -1034,6 +1175,9 @@ export class UI {
       ['Remesh / decimate', 'Modifiers in the panel, or one-shot from the globe menu (Object & Sculpt rail, Edit → Mesh tools)'],
       ['Rigging', 'Add → Armature · Edit mode: select a joint, Extrude (E) grows a bone · select mesh + armature, Rig → Bind'],
       ['Pose / weights', 'Pose mode: drag a bone to rotate it · Weight mode paints the chosen bone (blue 0 → red 1)'],
+      ['Animation', 'Pose mode timeline: drag to scrub, ◆ keys selected bones, auto-key keys every confirmed pose change · the film button manages actions (clips), range and fps'],
+      ['IK', 'Panel → Inverse kinematics → "Add IK + target bone", then move the target bone in Pose mode'],
+      ['Animation keys', 'I key · Alt+I delete key · Space play · ←/→ frame · ↑/↓ next/previous key · Alt+R clear pose'],
       ['Keys', 'Tab edit · G/R/S + X/Y/Z · E extrude · I inset · Ctrl+B bevel · K knife · O proportional · Ctrl+R loop cut · M merge · F fill · J connect · L linked · U unwrap · A all · X delete · Shift+D duplicate · Ctrl+Z undo'],
       ['Mouse', 'Left select/box · Middle orbit · Shift+Middle / Right pan · Wheel zoom'],
     ];

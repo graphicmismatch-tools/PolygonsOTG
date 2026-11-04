@@ -284,3 +284,19 @@ input.hue-slider::-webkit-slider-thumb, input.tint-slider::-webkit-slider-thumb 
 .cp-chip { width: 26px; height: 26px; border: 1px solid var(--rule); padding: 0; }
 .cp-chip.on { outline: 2px solid var(--fg); outline-offset: 1px; position: relative; z-index: 1; }
 .cp-add { display: grid; place-items: center; background: var(--bg); color: var(--fg2); }
+
+/* ---------------------------------------------------------------- timeline */
+.timeline { position: absolute; left: 0; right: 0; bottom: 19px; z-index: 3; display: flex; align-items: center; background: var(--bg2); border-top: 1px solid var(--rule); }
+.timeline .chip { border-width: 0 1px 0 0; min-height: 40px; }
+.tl-track { position: relative; flex: 1; min-width: 80px; height: 40px; margin: 0 14px; touch-action: none; cursor: ew-resize; }
+.tl-track::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px solid var(--rule); }
+.tl-tick { position: absolute; top: 50%; width: 9px; height: 9px; margin: -5px 0 0 -5px; transform: rotate(45deg); background: var(--accent2); border: 1px solid var(--bg); pointer-events: none; }
+.tl-mark { position: absolute; top: 4px; bottom: 4px; width: 1px; background: var(--rule2); pointer-events: none; }
+.tl-head { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; }
+.tl-head span { position: absolute; top: 1px; left: 4px; font-size: 10px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.tl-range { font-size: 10px; color: var(--fg3); padding: 0 6px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timeline input.num { width: 5ch; height: 40px; border-width: 0 1px 0 0; }
+.tl-action { padding: 0 10px; max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.warnlist { margin: 0; padding-left: 18px; }
+.warnlist li { margin: 6px 0; }
+.warnlist li.info { color: var(--fg2); }

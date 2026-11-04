@@ -170,3 +170,117 @@ describe('weights', () => {
     expect(r.verts.every((p) => p[2] > 0.6)).toBe(true);
   });
 });
+
+describe('ik', () => {
+  /** Two-bone leg along +Y plus an unparented target bone. */
+  function leg() {
+    const { mesh, arm } = chain();
+    const t = mesh.addVert([0, 1.5, 0.5]), tt = mesh.addVert([0, 1.5, 0.8]);
+    arm.bones.push({ name: 'Target', parent: -1, head: t, tail: tt, roll: 0, deform: false, pose: rig.identityPose() });
+    rig.syncJointMesh(mesh, arm);
+    arm.bones[1].ik = { enabled: true, target: 2, chain: 2, pole: -1, poleAngle: 0 };
+    return { mesh, arm };
+  }
+
+  it('reaches a target inside the chain length and keeps bone lengths', () => {
+    const { mesh, arm } = leg();
+    const ev = rig.evalArmature(mesh, arm);
+    const tip = new THREE.Vector3(0, 1, 0).applyMatrix4(ev.posed[1]);
+    expect(tip.distanceTo(new THREE.Vector3(0, 1.5, 0.5))).toBeLessThan(1e-3);
+    const knee = new THREE.Vector3().setFromMatrixPosition(ev.posed[1]);
+    expect(knee.length()).toBeCloseTo(1, 4);
+    // stored pose is untouched: IK is applied during evaluation
+    expect(arm.bones[0].pose.rot).toEqual([0, 0, 0, 1]);
+  });
+
+  it('follows the target when it moves and straightens when out of reach', () => {
+    const { mesh, arm } = leg();
+    arm.bones[2].pose.loc = [0, 5, 0]; // the target's rest frame points +Y, so this moves it far up
+    const ev = rig.evalArmature(mesh, arm);
+    const tip = new THREE.Vector3(0, 1, 0).applyMatrix4(ev.posed[1]);
+    expect(tip.length()).toBeCloseTo(2, 3);
+  });
+
+  it('bends toward the pole', () => {
+    const { mesh, arm } = leg();
+    const p = mesh.addVert([1, 1, 0]), pt = mesh.addVert([1, 1.2, 0]);
+    arm.bones.push({ name: 'Pole', parent: -1, head: p, tail: pt, roll: 0, deform: false, pose: rig.identityPose() });
+    rig.syncJointMesh(mesh, arm);
+    arm.bones[1].ik!.pole = 3;
+    arm.bones[2].pose.loc = [0, -0.5, 0.5]; // target bone points +Z: local (Y, Z) = world (Z, −Y), so this moves it to (0, 1, 0)
+    const ev = rig.evalArmature(mesh, arm);
+    const knee = new THREE.Vector3().setFromMatrixPosition(ev.posed[1]);
+    expect(knee.x).toBeGreaterThan(0.5);
+  });
+});
+
+describe('animation', () => {
+  it('interpolates keys and holds outside the range', () => {
+    const { arm } = chain();
+    const act = rig.newAction('Walk');
+    arm.actions.push(act);
+    arm.bones[0].pose.loc = [0, 0, 0];
+    rig.insertKeys(arm, act, [0], 1, 'linear');
+    arm.bones[0].pose.loc = [2, 0, 0];
+    rig.insertKeys(arm, act, [0], 11, 'linear');
+    rig.applyAction(arm, act, 6);
+    expect(arm.bones[0].pose.loc[0]).toBeCloseTo(1, 6);
+    rig.applyAction(arm, act, 50);
+    expect(arm.bones[0].pose.loc[0]).toBe(2);
+    expect(rig.keyFrames(arm, act)).toEqual([1, 11]);
+    expect(rig.deleteKeys(arm, act, [0], 11)).toBe(1);
+    expect(rig.keyFrames(arm, act)).toEqual([1]);
+  });
+
+  it('eases and slerps rotations', () => {
+    const { arm } = chain();
+    const act = rig.newAction('A');
+    rig.insertKeys(arm, act, [1], 0);
+    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+    arm.bones[1].pose.rot = [q.x, q.y, q.z, q.w];
+    rig.insertKeys(arm, act, [1], 10);
+    const mid = rig.sampleTrack(act.tracks.Upper, 5)!;
+    const angle = 2 * Math.acos(Math.min(1, mid.rot[3]));
+    expect(angle).toBeCloseTo(Math.PI / 4, 4);
+    const early = rig.sampleTrack(act.tracks.Upper, 2)!;
+    expect(2 * Math.acos(early.rot[3])).toBeLessThan((Math.PI / 2) * 0.2); // eased start
+  });
+
+  it('round-trips actions and IK through JSON and deletion', () => {
+    const { mesh, arm } = chain();
+    const act = rig.newAction('Run');
+    arm.actions.push(act); arm.activeAction = 0;
+    rig.insertKeys(arm, act, [0, 1], 3);
+    arm.bones[1].ik = { enabled: true, target: 0, chain: 1, pole: -1, poleAngle: 0 };
+    const back = rig.armatureFromJSON(JSON.parse(JSON.stringify(arm)));
+    expect(Object.keys(back.actions[0].tracks).sort()).toEqual(['Lower', 'Upper']);
+    expect(back.bones[1].ik!.target).toBe(0);
+    rig.deleteBones(mesh, back, new Set([0]));
+    expect(Object.keys(back.actions[0].tracks)).toEqual(['Upper']);
+    expect(back.bones[0].ik!.target).toBe(-1);
+  });
+});
+
+describe('export checks', () => {
+  it('warns about lost rigs, unweighted vertices and unkeyed poses', async () => {
+    const { exportCheck } = await import('../src/io/formats');
+    const scene = new Scene();
+    const { mesh: am, arm } = chain();
+    const a = new SceneObject('Rig', am); a.armature = arm;
+    const body = new SceneObject('Body', column());
+    autoWeights(body.mesh, am, arm, new THREE.Matrix4());
+    body.mesh.vw[0] = [];
+    const md = newModifier('armature'); md.target = a.id;
+    body.modifiers.push(md);
+    scene.add(a); scene.add(body);
+    arm.bones[1].pose.loc = [0, 0, 1];
+    const glb = exportCheck('glb', [body], scene);
+    expect(glb.warnings.some((w) => w.includes('1 vertex of Body has no bone weights'))).toBe(true);
+    expect(glb.warnings.some((w) => w.includes('is posed'))).toBe(true);
+    expect(glb.notes.some((n) => n.includes('Rig is included'))).toBe(true);
+    const obj = exportCheck('obj', [body, a], scene);
+    expect(obj.warnings.some((w) => w.includes('OBJ has no skeleton'))).toBe(true);
+    const clean = exportCheck('glb', [new SceneObject('Plain', createPrimitive('cube'))], scene);
+    expect(clean.warnings).toEqual([]);
+  });
+});
