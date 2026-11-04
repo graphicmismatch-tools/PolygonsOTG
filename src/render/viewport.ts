@@ -146,6 +146,8 @@ export class Viewport {
   private depthW = 0;
   private depthH = 0;
   private depthValid = false;
+  private depthNear = 0;
+  private depthFar = 1;
   private pointMat: THREE.ShaderMaterial;
   private lineMat: LineMaterial;
   private lineMatXray: LineMaterial;
@@ -170,16 +172,20 @@ export class Viewport {
     this.grid = makeGrid();
     this.scene3.add(this.grid);
 
+    // Linear view depth, remapped to [near, far] and packed into 24 bits with exact integer
+    // ops. Packing the non-linear gl_FragCoord.z with float divisions lost too much precision
+    // on mobile GPUs: interior vertices tested as hidden and only silhouette ones (whose
+    // neighbourhood touches the cleared background) survived box select.
     this.depthMat = new THREE.ShaderMaterial({
-      vertexShader: 'void main(){ gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
-      fragmentShader: `precision highp float;
+      uniforms: { uNear: { value: 0 }, uFar: { value: 1 } },
+      vertexShader: `varying float vViewZ;
+        void main(){ vec4 mv = modelViewMatrix * vec4(position,1.0); vViewZ = -mv.z; gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `precision highp float; precision highp int;
+        uniform float uNear; uniform float uFar; varying float vViewZ;
         void main(){
-          float d = clamp(gl_FragCoord.z, 0.0, 1.0);
-          float v = floor(d * 16777215.0);
-          float r = floor(v / 65536.0);
-          float g = floor((v - r * 65536.0) / 256.0);
-          float b = v - r * 65536.0 - g * 256.0;
-          gl_FragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+          float d = clamp((vViewZ - uNear) / (uFar - uNear), 0.0, 1.0);
+          uint v = uint(d * 16777215.0 + 0.5);
+          gl_FragColor = vec4(float((v >> 16u) & 255u), float((v >> 8u) & 255u), float(v & 255u), 255.0) / 255.0;
         }`,
       side: THREE.DoubleSide,
     });
@@ -485,6 +491,10 @@ export class Viewport {
       this.depthScene.add(v.depthMesh);
     }
     this.cam.update();
+    const cam = this.cam.camera as THREE.PerspectiveCamera | THREE.OrthographicCamera;
+    this.depthNear = cam.near; this.depthFar = cam.far;
+    this.depthMat.uniforms.uNear.value = cam.near;
+    this.depthMat.uniforms.uFar.value = cam.far;
     const prevClear = new THREE.Color();
     this.renderer.getClearColor(prevClear);
     this.renderer.setClearColor(0xffffff, 1);
@@ -504,7 +514,8 @@ export class Viewport {
     if (s.behind) return false;
     const px = Math.floor((s.x / this.width) * this.depthW);
     const py = Math.floor((1 - s.y / this.height) * this.depthH);
-    const d = s.z * 0.5 + 0.5;
+    const cam = this.cam.camera;
+    const vz = -world.clone().applyMatrix4(cam.matrixWorldInverse).z;
     let maxD = -1;
     for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
       const x = px + ox, y = py + oy;
@@ -514,12 +525,10 @@ export class Viewport {
       const sd = (b[i] * 65536 + b[i + 1] * 256 + b[i + 2]) / 16777215;
       if (sd > maxD) maxD = sd;
     }
-    if (maxD < 0) return true;
-    // compare in linear view depth to get a scale-independent tolerance
-    if (this.cam.ortho) return d <= maxD + tolerance;
-    const lin = (z: number) => { const n = this.cam.persp.near, f = this.cam.persp.far; const ndc = z * 2 - 1; return (2 * n * f) / (f + n - ndc * (f - n)); };
-    const ld = lin(d), ls = lin(maxD);
-    return ld <= ls + Math.max(ls * 0.01, 1e-3);
+    if (maxD < 0 || maxD >= 1) return true; // off-buffer or touching background (silhouette)
+    const surf = this.depthNear + maxD * (this.depthFar - this.depthNear);
+    const ref = this.cam.ortho ? this.cam.distance : Math.max(surf, 0);
+    return vz <= surf + Math.max(ref * 0.01, 1e-3) + tolerance;
   }
 
   objectMatrix(o: SceneObject): THREE.Matrix4 {
