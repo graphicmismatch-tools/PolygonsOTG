@@ -33,7 +33,8 @@ It runs as an Android app (Capacitor) and, from the same code, in any modern bro
 - **Split view:** the 3D edit view next to a 2D UV editor.
 - **Unwrapping:** seam-based LSCM conformal unwrap, smart UV project, and projection from view, cube, cylinder or sphere, plus island packing.
 - **UV editing:** move, rotate and scale (with axis lock), flip, rotate 90°, weld, align, fit to 0–1, and island selection.
-- **Textures:** a checker preview and image textures. You can export the UV layout as a PNG.
+- **Textures:** a checker preview and image textures.
+- **UV layout export (texture guide):** Menu → Export → UV layout, or the image menu in UV mode. It saves the 0–1 UV square as PNG (512 to 4K) or SVG, so you can paint a texture over it in any image editor. A live preview shows the options: transparent, white or black background; black, white or grey lines in three widths; faces filled grey or one colour per island; seams in red; an optional 8×8 grid. It warns when a layout makes a poor guide: no UVs yet, faces outside the square, overlapping islands or faces with no UV area. It also notes Mirror modifiers that share UVs and how much of the square the islands use.
 
 ### Rigging & weights
 - **Armatures:** Add → Armature. In Edit mode, bone joints act like vertices (tap, box select, drag, move/rotate/scale). Extrude (E) grows a child bone from the selected joint. You can also add, subdivide and delete bones, and symmetrize from +X to −X (Name.L → Name.R). The panel lists the bone hierarchy and edits each bone's name, parent, roll and whether it deforms the mesh.

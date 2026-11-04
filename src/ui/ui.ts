@@ -14,6 +14,7 @@ import { Modifier } from '../core/modifiers';
 import { openInputTest } from './inputTest';
 import { WEIGHT_TOOLS } from '../modes/weightPaint';
 import * as rig from '../core/armature';
+import { UVLayoutOptions, defaultLayoutOptions, drawUVLayout, uvLayoutSVG, uvLayoutPNG, uvLayoutCheck } from '../io/uvLayout';
 import { colorPicker } from './colorPicker';
 
 const MODES: { id: AppMode; label: string; icon: string }[] = [
@@ -178,6 +179,7 @@ export class UI {
         { label: 'Wavefront OBJ', action: () => this.exportModel('obj') },
         { label: 'glTF binary (GLB)', action: () => this.exportModel('glb') },
         { label: 'STL (3D print)', action: () => this.exportModel('stl') },
+        { label: 'UV layout (texture guide)…', hint: 'PNG / SVG', action: () => this.uvLayoutDialog() },
         { label: 'Screenshot PNG', action: () => this.screenshot() },
       ] },
       { separator: true, label: '' },
@@ -259,6 +261,60 @@ export class UI {
       else await saveFile(`${name}.glb`, 'model/gltf-binary', await exportGLB(objs, (u) => this.app.vp.getTexture(u), this.app.scene));
       if (!isAndroidApp()) toast(`Exported ${name}.${kind}`);
     } catch (e) { toast(`Export failed: ${(e as Error).message}`); }
+  }
+
+  /** Options dialog with a live preview for the UV layout image. */
+  private uvLayoutDialog() {
+    const app = this.app;
+    app.confirmModal();
+    const objs = (app.isEditLike && app.active ? [app.active] : this.exportTargets()).filter((o) => !o.armature && o.mesh.faces.length);
+    if (!objs.length) { toast('Select a mesh with faces'); return; }
+    let o: UVLayoutOptions = defaultLayoutOptions();
+    try { o = { ...o, ...JSON.parse(localStorage.getItem('polygons-otg-uvlayout') ?? '{}') }; } catch { /* ignore */ }
+    const preview = h('canvas', { class: 'uvl-preview' }) as HTMLCanvasElement;
+    const px = 260, dpr = Math.min(2, window.devicePixelRatio || 1);
+    preview.width = preview.height = Math.round(px * dpr);
+    const draw = () => drawUVLayout(preview.getContext('2d')!, objs, { ...o, lineWidth: o.lineWidth * Math.max(1, 1024 / o.size) * 0.6 }, preview.width);
+    const controls = h('div', {});
+    const seg = <T extends string | number>(label: string, opts: [T, string][], get: () => T, set: (v: T) => void) => {
+      const box = h('div', { class: 'seg' });
+      const paint = () => { clear(box); box.append(...opts.map(([v, l]) => h('button', { class: `segbtn${get() === v ? ' on' : ''}`, onclick: () => { set(v); paint(); draw(); } }, l))); };
+      paint();
+      return h('div', { class: 'row' }, h('span', { class: 'vlabel' }, label), box);
+    };
+    const check = (label: string, get: () => boolean, set: (v: boolean) => void) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: get(), onchange: (e: Event) => { set((e.target as HTMLInputElement).checked); draw(); } }), label);
+    const opacity = h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(o.fillOpacity) }) as HTMLInputElement;
+    opacity.addEventListener('input', () => { o.fillOpacity = +opacity.value; draw(); });
+    controls.append(
+      seg('Size', [[512, '512'], [1024, '1K'], [2048, '2K'], [4096, '4K']], () => o.size, (v) => (o.size = v)),
+      seg('Format', [['png', 'PNG'], ['svg', 'SVG']], () => o.format, (v) => (o.format = v)),
+      seg('Back', [['transparent', 'None'], ['white', 'White'], ['black', 'Black']], () => o.background, (v) => (o.background = v)),
+      seg('Lines', [['#000000', 'Black'], ['#ffffff', 'White'], ['#7f7f7f', 'Grey']], () => o.lineColor, (v) => (o.lineColor = v)),
+      seg('Width', [[1, 'Thin'], [2, 'Normal'], [4, 'Bold']], () => o.lineWidth, (v) => (o.lineWidth = v)),
+      seg('Fill', [['none', 'None'], ['grey', 'Grey'], ['islands', 'Islands']], () => o.fill, (v) => (o.fill = v)),
+      h('div', { class: 'row' }, h('span', { class: 'vlabel' }, 'Opacity'), opacity),
+      check('Seams in red', () => o.seams, (v) => (o.seams = v)),
+      check('Grid and 0–1 border', () => o.grid, (v) => (o.grid = v)),
+    );
+    const { warnings, notes } = uvLayoutCheck(objs);
+    const checks = warnings.length || notes.length ? h('ul', { class: 'warnlist' }, warnings.map((w) => h('li', {}, w)), notes.map((n) => h('li', { class: 'info' }, n))) : null;
+    const body = h('div', { class: 'settings uvl' },
+      h('div', { class: 'uvl-top' }, preview, controls),
+      h('p', { class: 'note' }, 'The image is the 0–1 UV square (top = V 1), the same way the texture is mapped. Paint on a layer under it, then hide it.'),
+      checks);
+    draw();
+    const name = objs.length === 1 ? objs[0].name : 'scene';
+    dialog(`UV layout · ${objs.map((x) => x.name).join(', ')}`, body, [
+      { label: 'Cancel' },
+      { label: 'Export', primary: true, action: async () => {
+        try { localStorage.setItem('polygons-otg-uvlayout', JSON.stringify(o)); } catch { /* ignore */ }
+        try {
+          if (o.format === 'svg') await saveFile(`${name}_uv.svg`, 'image/svg+xml', uvLayoutSVG(objs, o));
+          else await saveFile(`${name}_uv.png`, 'image/png', await uvLayoutPNG(objs, o));
+          if (!isAndroidApp()) toast(`Exported ${name}_uv.${o.format}`);
+        } catch (e) { toast(`Export failed: ${(e as Error).message}`); }
+      } },
+    ]);
   }
 
   private async screenshot() {
@@ -511,7 +567,7 @@ export class UI {
           { label: 'Load texture…', action: () => this.loadTexture() },
           { label: 'Remove texture', action: () => this.setTexture(null), disabled: !app.active?.material.texture },
           { label: 'Checker preview', checked: app.vp.settings.checker, action: () => { app.vp.settings.checker = !app.vp.settings.checker; app.changed(); this.renderRail(); } },
-          { label: 'Export UV layout PNG', action: () => uv.exportLayout() },
+          { label: 'Export UV layout (texture guide)…', action: () => this.uvLayoutDialog() },
         ], 'uvtool'),
       ),
     ];

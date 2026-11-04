@@ -2,7 +2,6 @@ import { App } from '../app';
 import { Gestures, PInfo, ToolHandler } from '../input';
 import { V2 } from '../core/vec';
 import { uvIslands } from '../core/uv';
-import { saveFile } from '../io/files';
 
 type UVKind = 'move' | 'rotate' | 'scale';
 
@@ -523,25 +522,6 @@ export class UVEditor {
     ctx.fillText(m.selF.size ? `${faces.length} selected faces` : 'All faces (select faces in 3D to filter)', 10, this.height - 10);
   }
 
-  async exportLayout(size = 1024) {
-    const o = this.obj ?? this.app.active;
-    if (!o) return;
-    const c = document.createElement('canvas');
-    c.width = c.height = size;
-    const ctx = c.getContext('2d')!;
-    ctx.strokeStyle = '#000';
-    ctx.lineWidth = Math.max(1, size / 512);
-    ctx.fillStyle = 'rgba(128,128,128,0.25)';
-    for (const f of o.mesh.faces) {
-      ctx.beginPath();
-      f.uv.forEach((u, i) => { const x = u[0] * size, y = (1 - u[1]) * size; if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    }
-    const blob: Blob = await new Promise((res) => c.toBlob((b) => res(b!), 'image/png'));
-    await saveFile(`${o.name}_uv.png`, 'image/png', blob);
-  }
 }
 
 function pointInPoly(x: number, y: number, poly: V2[]) {

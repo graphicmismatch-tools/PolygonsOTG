@@ -300,3 +300,9 @@ input.hue-slider::-webkit-slider-thumb, input.tint-slider::-webkit-slider-thumb 
 .warnlist { margin: 0; padding-left: 18px; }
 .warnlist li { margin: 6px 0; }
 .warnlist li.info { color: var(--fg2); }
+
+/* ---------------------------------------------------------------- uv layout export */
+.uvl-top { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
+.uvl-top > div { flex: 1; min-width: 240px; }
+.uvl-preview { width: 260px; height: 260px; flex: none; border: 1px solid var(--rule); background-color: #d9d9d9; background-image: linear-gradient(45deg, #bbb 25%, transparent 25%, transparent 75%, #bbb 75%), linear-gradient(45deg, #bbb 25%, transparent 25%, transparent 75%, #bbb 75%); background-size: 16px 16px; background-position: 0 0, 8px 8px; }
+@media (max-width: 560px) { .uvl-preview { width: 100%; height: auto; aspect-ratio: 1; } }
