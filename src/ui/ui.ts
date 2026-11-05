@@ -16,6 +16,7 @@ import { WEIGHT_TOOLS } from '../modes/weightPaint';
 import * as rig from '../core/armature';
 import { UVLayoutOptions, defaultLayoutOptions, drawUVLayout, uvLayoutSVG, uvLayoutPNG, uvLayoutCheck } from '../io/uvLayout';
 import { colorPicker } from './colorPicker';
+import { ViewGizmo } from '../render/viewGizmo';
 
 const MODES: { id: AppMode; label: string; icon: string }[] = [
   { id: 'object', label: 'Object', icon: 'modeObject' },
@@ -80,6 +81,12 @@ export class UI {
 
     this.app = new App(canvas, overlay, this.view3d);
     this.uv = new UVEditor(uvCanvas, this.viewUV, this.app);
+    const app0 = this.app;
+    const viewGizmo = new ViewGizmo(app0.vp.cam, (dx, dy) => { app0.vp.cam.orbit(dx, dy); app0.redraw(); }, (v) => app0.animateView(v));
+    this.view3d.append(viewGizmo.el);
+    app0.afterOverlay = () => viewGizmo.draw();
+    const sizeGizmo = () => viewGizmo.resize(this.view3d.clientWidth < 520 ? 76 : 96, Math.min(window.devicePixelRatio || 1, 2.5));
+    sizeGizmo();
     this.app.uvRedraw = () => this.uv.redraw();
     this.uv.onModal = () => this.renderModal();
     installTooltips();
@@ -94,7 +101,7 @@ export class UI {
     app.on('status', () => this.renderStatus());
     app.on('frame', () => this.renderTimeline());
 
-    const ro = new ResizeObserver(() => { app.resize(); this.uv.resize(); });
+    const ro = new ResizeObserver(() => { app.resize(); this.uv.resize(); sizeGizmo(); });
     ro.observe(this.view3d);
     ro.observe(this.viewUV);
     window.addEventListener('resize', () => { app.resize(); this.uv.resize(); });

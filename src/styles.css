@@ -89,7 +89,7 @@ input { font: inherit; color: inherit; }
 @media (orientation: portrait) { .workspace { flex-direction: column; } .viewuv { border-left: 0; border-top: 1px solid var(--rule); } }
 
 /* ---------------------------------------------------------------- floating edit bar */
-.editbar { position: absolute; top: 6px; left: 6px; right: 58px; display: flex; flex-wrap: wrap; gap: 0; pointer-events: none; z-index: 3; }
+.editbar { position: absolute; top: 6px; left: 6px; right: 108px; display: flex; flex-wrap: wrap; gap: 0; pointer-events: none; z-index: 3; }
 .editbar > * { pointer-events: auto; margin: 0 -1px -1px 0; }
 .chip { min-height: 36px; min-width: 38px; padding: 0 8px; background: var(--bg2); border: 1px solid var(--rule); display: inline-flex; align-items: center; justify-content: center; gap: 6px; color: var(--fg); }
 .chip.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); position: relative; z-index: 1; }
@@ -306,3 +306,8 @@ input.hue-slider::-webkit-slider-thumb, input.tint-slider::-webkit-slider-thumb 
 .uvl-top > div { flex: 1; min-width: 240px; }
 .uvl-preview { width: 260px; height: 260px; flex: none; border: 1px solid var(--rule); background-color: #d9d9d9; background-image: linear-gradient(45deg, #bbb 25%, transparent 25%, transparent 75%, #bbb 75%), linear-gradient(45deg, #bbb 25%, transparent 25%, transparent 75%, #bbb 75%); background-size: 16px 16px; background-position: 0 0, 8px 8px; }
 @media (max-width: 560px) { .uvl-preview { width: 100%; height: auto; aspect-ratio: 1; } }
+
+/* ---------------------------------------------------------------- orientation gizmo */
+.view canvas.viewgizmo { position: absolute; inset: auto; top: 6px; right: 6px; z-index: 3; touch-action: none; cursor: grab; border-radius: 50%; }
+.view canvas.viewgizmo:active { cursor: grabbing; }
+@media (max-width: 700px) { .editbar { right: 88px; } }

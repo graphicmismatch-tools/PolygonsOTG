@@ -324,6 +324,31 @@ export class App {
   }
 
   setView(v: 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom') { this.vp.cam.setView(v); this.redraw(); }
+
+  /** Turn smoothly to a standard view (orientation gizmo). */
+  animateView(v: 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom') {
+    const cam = this.vp.cam;
+    const from = { yaw: cam.yaw, pitch: cam.pitch };
+    cam.setView(v);
+    const to = { yaw: cam.yaw, pitch: cam.pitch };
+    cam.yaw = from.yaw; cam.pitch = from.pitch;
+    let dy = (to.yaw - from.yaw) % (Math.PI * 2);
+    if (dy > Math.PI) dy -= Math.PI * 2;
+    if (dy < -Math.PI) dy += Math.PI * 2;
+    const t0 = performance.now(), dur = 220;
+    const step = () => {
+      const t = Math.min(1, (performance.now() - t0) / dur);
+      const e = t * t * (3 - 2 * t);
+      cam.yaw = from.yaw + dy * e;
+      cam.pitch = from.pitch + (to.pitch - from.pitch) * e;
+      this.redraw();
+      if (t < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  /** Extra drawing after each render (orientation gizmo). */
+  afterOverlay: () => void = () => {};
   toggleOrtho() { this.vp.cam.ortho = !this.vp.cam.ortho; this.emit('mode'); this.redraw(); }
 
   /* ================================================================ pivot & selection info */
@@ -948,6 +973,7 @@ export class App {
 
   /* ================================================================ overlay */
   private drawOverlay() {
+    this.afterOverlay();
     const ctx = this.overlay;
     const dpr = this.vp.dpr;
     ctx.setTransform(1, 0, 0, 1, 0, 0);

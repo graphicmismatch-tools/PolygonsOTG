@@ -163,7 +163,7 @@ export class Gestures {
   /** Only events that start on the drawing surface are gestures; floating UI keeps its own. */
   private isSurface(e: Event) {
     const t = e.target as HTMLElement | null;
-    return !!t && (t === this.el || t.tagName === 'CANVAS');
+    return !!t && (t === this.el || (t.tagName === 'CANVAS' && !t.classList.contains('viewgizmo')));
   }
 
   private down = (e: PointerEvent) => {

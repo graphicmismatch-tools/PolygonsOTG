@@ -12,6 +12,7 @@ It runs as an Android app (Capacitor) and, from the same code, in any modern bro
 
 ### Object mode
 - **Primitives:** cube, plane, grid, circle, UV sphere, ico sphere, cylinder, cone, torus and single vertex.
+- **Orientation gizmo:** the X/Y/Z axes in the corner of the 3D view follow the camera. Tap an axis to look along it, tap the one facing you to flip to the opposite side, and drag the gizmo to orbit.
 - **Transforms:** move, rotate and scale with a gizmo or a drag-anywhere tool. There are X/Y/Z axis locks, typed values and snapping.
 - **Object tools:** duplicate, delete, join, apply transform, set origin, and flat/smooth shading.
 - **Properties panel:** an outliner, numeric location, rotation and scale fields, a modifier stack and a material. The material has a colour picker, roughness, metalness and an image texture.
