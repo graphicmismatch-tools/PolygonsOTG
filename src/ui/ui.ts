@@ -1203,7 +1203,7 @@ export class UI {
       h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, 'Palm rejection'), seg([['auto', 'Auto'], ['on', 'Pen only'], ['off', 'Off']], g.palmRejection, (v) => { g.palmRejection = v; s.palmRejection = v; if (v === 'off' || v === 'auto') app.gestures.resetPen(); this.renderStatus(); this.saveInputSettings(); })),
       h('p', { class: 'note' }, 'Auto: once an active pen is used, fingers only navigate (orbit / pan / zoom) and the pen does all editing. Pen barrel button drag orbits.'),
       check('Touch acts like a pen (1 finger edits, 2 fingers navigate)', g.touchAsPen, (x) => { g.touchAsPen = x; this.saveInputSettings(); this.renderEditBar(); this.renderStatus(); }),
-      h('p', { class: 'note' }, 'Turn this on if your stylus is reported as a finger (e.g. Lenovo Tab Pen Plus on the Idea Tab Pro): the pen then taps, box-selects, moves and sculpts like a real pen.'),
+      h('p', { class: 'note' }, 'Turn this on if your stylus is reported as a finger: the pen then taps, box-selects, moves and sculpts like a real pen.'),
       h('div', { class: 'row' }, h('span', { class: 'vlabel wide' }, 'Pen detection'), seg([['auto', 'Auto'], ['thin', 'Thin contact = pen']], g.stylusDetect, (v) => { g.stylusDetect = v; this.saveInputSettings(); })),
       h('p', { class: 'note' }, 'Use "Thin contact = pen" only if the stylus test shows your pen arriving as a finger.'),
       h('div', { class: 'row' },

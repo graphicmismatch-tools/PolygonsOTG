@@ -1,7 +1,7 @@
 import { h, clear, icon } from './dom';
 
 /* ======================================================================
- * Respite / Aseprite-style colour picker: SV square + vertical hue strip,
+ * Aseprite-style colour picker: SV square + vertical hue strip,
  * RGB / HSV slider tabs with number boxes, hex field and a saved palette.
  * HSV is kept as its own state so the hue survives greys and black.
  * ==================================================================== */

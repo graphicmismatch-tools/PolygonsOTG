@@ -263,7 +263,7 @@ input.hue-slider::-webkit-slider-thumb, input.tint-slider::-webkit-slider-thumb 
 .input-summary .ok { color: var(--y); }
 .input-summary .bad { color: var(--danger); }
 
-/* ---------------------------------------------------------------- colour picker (Respite-style) */
+/* ---------------------------------------------------------------- colour picker */
 .cp { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
 .cp-head { display: flex; align-items: center; gap: 6px; }
 .cp-swatch { width: 34px; height: 34px; border: 1px solid var(--rule); flex: none; }

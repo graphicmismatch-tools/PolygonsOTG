@@ -14,7 +14,7 @@ It runs as an Android app (Capacitor) and, from the same code, in any modern bro
 - **Primitives:** cube, plane, grid, circle, UV sphere, ico sphere, cylinder, cone, torus and single vertex.
 - **Transforms:** move, rotate and scale with a gizmo or a drag-anywhere tool. There are X/Y/Z axis locks, typed values and snapping.
 - **Object tools:** duplicate, delete, join, apply transform, set origin, and flat/smooth shading.
-- **Properties panel:** an outliner, numeric location, rotation and scale fields, a modifier stack and a material. The material has a Respite-style colour picker, roughness, metalness and an image texture.
+- **Properties panel:** an outliner, numeric location, rotation and scale fields, a modifier stack and a material. The material has a colour picker, roughness, metalness and an image texture.
 - **Modifiers:** Mirror, Subdivision Surface, Remesh and Decimate. All of them can be applied.
 
 ### Edit mode (vertex / edge / face)
@@ -93,8 +93,8 @@ Use these as modifiers or as one-step actions (the globe button in the Object an
 ### Appearance
 Go to *Menu → Settings → Appearance* and pick a hue and tint (tint 0 gives neutral grey). Functional colours stay fixed: the X/Y/Z axes, red for destructive actions and seams, and the orange viewport selection.
 
-### Tablet note: Lenovo Idea Tab Pro + Tab Pen Plus
-On this tablet, the pen stopped working while an earlier custom WebView build of the app was maximised. It only came back in a floating window, or after turning the screen off and on. Rebuilding the Android shell as a stock Capacitor project fixed it. The shell now uses the same Capacitor versions and setup as the [Respite](https://github.com/graphicmismatch/respite) pixel editor, which already worked on that tablet. **Keep the `android/` project close to the Capacitor template** if you change it.
+### Android shell
+The Android app is a stock Capacitor project. Some stylus drivers stop delivering pen input to a customised, maximised WebView while still working in the stock Capacitor activity, so **keep the `android/` project close to the Capacitor template** if you change it.
 
 ---
 

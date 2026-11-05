@@ -1,6 +1,6 @@
 /* ======================================================================
- * Platform file access. In the Android app (Capacitor, same setup as
- * Respite) files are written to the cache and handed to the share sheet,
+ * Platform file access. In the Android app (Capacitor) files are written
+ * to the cache and handed to the share sheet,
  * because <a download> does nothing in a WebView. Opening uses
  * <input type=file>, which Capacitor's WebView client turns into the
  * system file picker. In a browser we use downloads.

@@ -60,9 +60,8 @@ export interface GestureSettings {
    */
   stylusDetect: 'auto' | 'thin';
   /**
-   * Respite-style input: a single touch is a tool (like a pen) instead of
-   * navigation. For styluses the OS reports as fingers (e.g. Lenovo Tab Pen
-   * Plus on the Idea Tab Pro). Two fingers still pinch / pan / undo.
+   * A single touch is a tool (like a pen) instead of navigation. For
+   * styluses the OS reports as fingers. Two fingers still pinch / pan / undo.
    */
   touchAsPen: boolean;
 }
