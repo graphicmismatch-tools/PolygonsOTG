@@ -86,7 +86,7 @@ Use these as modifiers or as one-step actions (the globe button in the Object an
 - **Transform tools** work without a keyboard. Tap Move, Rotate, Scale or Extrude, then drag anywhere; repeated drags add up. Lock to an axis with the X/Y/Z chips (or N for the face normal), type an exact value, then tap ✓.
 - **Parametric tools** (inset, bevel, loop cut, subdivide, remesh and others) show −/+ steppers. You can also drag in the view to adjust them.
 - **Long-press any icon** to see its name. A long-press never runs the tool. Hovering with a pen or mouse also shows the name.
-- **Palm rejection (Auto):** once a pen is seen, fingers only move the view and the pen does all the editing.
+- **Palm rejection (Auto):** once a pen is seen, fingers only move the view and the pen does all the editing. It only applies inside the 3D and UV views: toolbar buttons, menus and the panel take finger taps even while a palm rests on the screen or the pen is down.
 - **Touch acts like a pen:** this toggle is for styluses the system reports as a finger. With it on, one touch edits exactly like a pen and two fingers navigate.
 - **Menu → Stylus & touch test** shows live what your pen and fingers report: type, pressure, tilt, buttons and contact size.
 - **Blender keys** work with a keyboard attached: Tab, G/R/S then X/Y/Z, E, I, Ctrl+B, K, O, Ctrl+R, M, F, J, L, U, A, X, Shift+D, 1/2/3 and Numpad 1/3/5/7.

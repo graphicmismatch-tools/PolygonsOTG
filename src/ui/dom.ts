@@ -184,8 +184,14 @@ export function icon(name: string, size = 22): SVGSVGElement {
 let tipEl: HTMLElement | null = null;
 let tipTimer = 0;
 let hideTimer = 0;
-let suppressClick = false;
-let pressStart: { x: number; y: number; target: HTMLElement } | null = null;
+/**
+ * Presses are tracked per pointer: a palm resting on a toolbar button while
+ * the pen draws must not cancel, or swallow, a finger tap elsewhere.
+ */
+interface Press { x: number; y: number; target: HTMLElement; timer: number; long: boolean }
+const presses = new Map<number, Press>();
+/** Element whose next click is swallowed because its press was a long-press (show-name only). */
+let suppress: { el: HTMLElement; pointerId: number; until: number } | null = null;
 
 export function tip<T extends HTMLElement>(el: T, text: string): T {
   el.dataset.tip = text;
@@ -218,47 +224,106 @@ export function hideTip(delay = 0) {
   hideTimer = window.setTimeout(() => tipEl?.classList.remove('show'), delay);
 }
 
+/**
+ * Browsers only turn a touch into a click when it is the only pointer on the
+ * screen. While a palm rests on the display (or the pen is down), finger taps
+ * on buttons would therefore do nothing. Here a short, still tap on a control
+ * that ends while other pointers are down activates the control itself; a
+ * native click that still arrives for it is dropped so nothing fires twice.
+ */
+function installMultiPointerTaps(longPresses: () => Map<number, Press>) {
+  const active = new Set<number>();
+  const taps = new Map<number, { x: number; y: number; t: number; el: HTMLElement; crowded: boolean }>();
+  let synthetic: { el: HTMLElement; until: number } | null = null;
+  const CONTROL = 'button, label, a[href], .orow, .swatch, [role="button"]';
+  document.addEventListener('pointerdown', (e) => {
+    const crowded = active.size > 0;
+    active.add(e.pointerId);
+    if (e.pointerType === 'mouse') return;
+    const t = e.target as HTMLElement | null;
+    const el = t?.closest?.(CONTROL) as HTMLElement | null;
+    // other pointers already down: mark the ones before as crowded too
+    for (const tap of taps.values()) tap.crowded = true;
+    if (el && !(el as HTMLButtonElement).disabled) taps.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now(), el, crowded });
+  }, true);
+  document.addEventListener('pointermove', (e) => {
+    const tap = taps.get(e.pointerId);
+    if (tap && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) > 12) taps.delete(e.pointerId);
+  }, true);
+  const forget = (e: PointerEvent) => { active.delete(e.pointerId); taps.delete(e.pointerId); };
+  document.addEventListener('pointercancel', forget, true);
+  document.addEventListener('pointerup', (e) => {
+    const tap = taps.get(e.pointerId);
+    const others = active.size > 1;
+    forget(e);
+    if (!tap || !(others || tap.crowded)) return;
+    if (performance.now() - tap.t > 600 || longPresses().get(e.pointerId)?.long) return;
+    if (!tap.el.isConnected || !tap.el.contains(document.elementFromPoint(e.clientX, e.clientY))) return;
+    synthetic = { el: tap.el, until: performance.now() + 500 };
+    // let the tooltip bookkeeping for this pointer finish first
+    setTimeout(() => tap.el.click(), 0);
+  }, true);
+  document.addEventListener('click', (e) => {
+    const s = synthetic;
+    if (!s) return;
+    if (performance.now() > s.until) { synthetic = null; return; }
+    // our own .click() has isTrusted false; drop the browser's late duplicate
+    if (e.isTrusted && s.el.contains(e.target as Node)) { e.preventDefault(); e.stopPropagation(); synthetic = null; }
+  }, true);
+}
+
 export function installTooltips() {
   const findTip = (e: Event) => (e.target as HTMLElement | null)?.closest?.('[data-tip]') as HTMLElement | null;
   document.addEventListener('pointerdown', (e) => {
-    hideTip();
     const t = findTip(e);
     if (!t) return;
-    pressStart = { x: e.clientX, y: e.clientY, target: t };
-    tipTimer = window.setTimeout(() => {
-      if (!pressStart) return;
+    if (!presses.size) hideTip();
+    const press: Press = { x: e.clientX, y: e.clientY, target: t, long: false, timer: 0 };
+    press.timer = window.setTimeout(() => {
+      if (presses.get(e.pointerId) !== press) return;
+      press.long = true;
       showTip(t);
-      suppressClick = true;
       navigator.vibrate?.(10);
     }, e.pointerType === 'mouse' ? 700 : 450);
+    presses.set(e.pointerId, press);
   }, true);
   document.addEventListener('pointermove', (e) => {
-    if (pressStart && Math.hypot(e.clientX - pressStart.x, e.clientY - pressStart.y) > 10) { pressStart = null; clearTimeout(tipTimer); }
+    const pr = presses.get(e.pointerId);
+    if (pr && !pr.long && Math.hypot(e.clientX - pr.x, e.clientY - pr.y) > 10) { clearTimeout(pr.timer); presses.delete(e.pointerId); }
   }, true);
-  const end = () => {
-    if (pressStart && suppressClick) hideTip(1200);
-    pressStart = null;
-    clearTimeout(tipTimer);
-    // the click (if any) fires right after pointerup; release suppression shortly after
-    if (suppressClick) setTimeout(() => (suppressClick = false), 350);
+  const end = (e: PointerEvent) => {
+    const pr = presses.get(e.pointerId);
+    if (!pr) return;
+    clearTimeout(pr.timer);
+    presses.delete(e.pointerId);
+    if (pr.long) {
+      hideTip(1200);
+      // a long-press only shows the name: swallow the click this pointer is about to make
+      suppress = { el: pr.target, pointerId: e.pointerId, until: performance.now() + 350 };
+    }
   };
   document.addEventListener('pointerup', end, true);
   document.addEventListener('pointercancel', end, true);
   document.addEventListener('click', (e) => {
-    if (suppressClick) { e.preventDefault(); e.stopPropagation(); suppressClick = false; }
+    const s = suppress;
+    if (!s || performance.now() > s.until) { suppress = null; return; }
+    const id = (e as PointerEvent).pointerId;
+    const samePointer = id === undefined || id === -1 || id === s.pointerId;
+    if (samePointer && s.el.contains(e.target as Node)) { e.preventDefault(); e.stopPropagation(); suppress = null; }
   }, true);
   document.addEventListener('contextmenu', (e) => { if (findTip(e)) e.preventDefault(); }, true);
+  installMultiPointerTaps(() => presses);
   // hover tooltips for mouse and hovering pens
   const canHover = () => matchMedia('(any-hover: hover)').matches;
   document.addEventListener('pointerover', (e) => {
-    if (e.pointerType === 'touch' || pressStart || (e.pointerType === 'mouse' && !canHover())) return;
+    if (e.pointerType === 'touch' || presses.size || (e.pointerType === 'mouse' && !canHover())) return;
     const t = findTip(e);
     if (!t) return;
     clearTimeout(tipTimer);
     tipTimer = window.setTimeout(() => showTip(t), 550);
   });
   document.addEventListener('pointerout', (e) => {
-    if (e.pointerType === 'touch' || pressStart) return;
+    if (e.pointerType === 'touch' || presses.size) return;
     const t = findTip(e);
     if (t && !t.contains(e.relatedTarget as Node)) hideTip();
   });
